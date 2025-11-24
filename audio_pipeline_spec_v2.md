@@ -520,7 +520,58 @@ Testschritte:
 
 ---
 
-## 14. Zusammenfassung
+## 14 Projektstruktur
+
+```
+
+zephyr-audio-pipeline/
+├─ module.yml
+├─ CMakeLists.txt
+├─ Kconfig
+├─ include/
+│  └─ zephyr/
+│     └─ audio/
+│        ├─ audio_format.h
+│        ├─ audio_node.h
+│        ├─ audio_pipeline.h
+│        └─ audio_pipeline_events.h
+├─ subsys/
+│  └─ audio/
+│     └─ pipeline/
+│        ├─ CMakeLists.txt
+│        ├─ Kconfig
+│        ├─ audio_pipeline_core.c
+│        ├─ audio_pipeline_config.c
+│        ├─ audio_pipeline_events.c
+│        ├─ audio_node_core.c
+│        ├─ audio_internal.h
+│        ├─ nodes/
+│        │   ├─ file_reader_node.c
+│        │   ├─ file_writer_node.c
+│        │   ├─ gain_filter_node.c
+│        │   └─ null_sink_node.c
+│        └─ util/
+│            ├─ wav_parser.c
+│            └─ wav_parser.h
+├─ samples/
+│  └─ audio/
+│     └─ pipeline_basic/
+│        ├─ CMakeLists.txt
+│        ├─ Kconfig
+│        └─ src/main.c
+└─ tests/
+   └─ subsys/
+      └─ audio/
+         └─ pipeline/
+            ├─ CMakeLists.txt
+            ├─ Kconfig
+            ├─ test_roundtrip.c
+            └─ test_error_paths.c
+
+```
+
+
+## 15. Zusammenfassung
 
 Diese Spezifikation definiert:
 
