@@ -1,0 +1,4 @@
+name: zephyr-audio-pipeline
+build:
+  cmake: .
+  kconfig: Kconfig

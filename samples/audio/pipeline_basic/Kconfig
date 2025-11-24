@@ -1,0 +1,5 @@
+config SAMPLE_AUDIO_PIPELINE_BASIC
+	bool "Build the audio pipeline basic sample"
+	default y
+	help
+	  Enable the basic sample showcasing the audio pipeline skeleton.

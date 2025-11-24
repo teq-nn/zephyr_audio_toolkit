@@ -1,66 +1,66 @@
-# Zephyr Audio Pipeline – Software-Spezifikation (v1)
+# Zephyr Audio Pipeline – Software Specification (v1)
 
-Dieses Dokument beschreibt die Architektur und das Verhalten eines Audio-Pipeline-Subsystems für Zephyr.  
-Es ist so formuliert, dass ein externer Entwickler die Implementierung ohne weitere Kontextinformationen umsetzen kann.
-
----
-
-## 1. Zielsetzung
-
-### 1.1 Zweck
-
-Das Subsystem stellt eine **leichtgewichtige Audio-Pipeline** bereit, mit der sich Audio-Daten in Form von Quellen (Sources), Verarbeitern (Filter) und Senken (Sinks) verketten lassen.
-
-### 1.2 Designziele
-
-- **Pull-basiertes Datenflussmodell**
-- **Ein Worker-Thread pro Pipeline**
-- **Statische Speicherallokation** (keine `k_malloc` im Subsystem)
-- **Kanonisches internes Sampleformat: 32‑bit signed, Little Endian**
-- **Eindeutige Rollen**: Source, Filter, Sink
-- **Deterministische Latenz durch globale Frame-Größe**
-- **Zephyr-konforme Fehlercodes und Coding Style**
-
-### 1.3 Nicht-Ziele (v1)
-
-- Kein generischer Support für Float-Verarbeitung (nur vorbereitete Erweiterbarkeit).
-- Keine dynamische Rekonfiguration der Pipeline zur Laufzeit (Format & Struktur sind in v1 statisch).
-- Keine Unterstützung von Mehrfach-Ein-/Ausgängen in Nodes (keine Mixer/Splitter in v1).
+This document describes the architecture and behavior of an audio pipeline subsystem for Zephyr.  
+It is written so an external developer can implement it without additional context.
 
 ---
 
-## 2. Grundlegende Architektur
+## 1. Goals
 
-### 2.1 Komponenten
+### 1.1 Purpose
 
-- **Audio-Pipeline (`audio_pipeline`)**  
-  - Hält eine geordnete Liste von Nodes (Source → Filter... → Sink).  
-  - Besitzt einen eigenen Worker-Thread.  
-  - Verantwortlich für:
-    - Lebenszyklus (open/close) aller Nodes,
-    - Start/Stop der Verarbeitung,
-    - Event-Erzeugung (EOF, Fehler).
+The subsystem provides a **lightweight audio pipeline** that chains audio data across sources, filters, and sinks.
+
+### 1.2 Design goals
+
+- **Pull-based dataflow model**
+- **One worker thread per pipeline**
+- **Static memory allocation** (no `k_malloc` in the subsystem)
+- **Canonical internal sample format: 32-bit signed, Little Endian**
+- **Clear roles**: source, filter, sink
+- **Deterministic latency via global frame size**
+- **Zephyr-compliant error codes and coding style**
+
+### 1.3 Non-goals (v1)
+
+- No generic support for float processing (extensibility only).
+- No dynamic runtime reconfiguration of the pipeline (format & structure are static in v1).
+- No multi-input or multi-output nodes (no mixer/splitter in v1).
+
+---
+
+## 2. Core Architecture
+
+### 2.1 Components
+
+- **Audio pipeline (`audio_pipeline`)**  
+  - Holds an ordered list of nodes (source → filter... → sink).  
+  - Owns its own worker thread.  
+  - Responsible for:
+    - Lifecycle (open/close) of all nodes,
+    - Start/stop of processing,
+    - Event generation (EOF, errors).
 
 - **Nodes (`audio_node`)**  
-  - Implementieren Audio-Funktionalität.  
-  - sind in drei Rollen klassifiziert:
-    - **Source**: erzeugt Daten
-    - **Filter**: transformiert Daten
-    - **Sink**: konsumiert Daten
+  - Implement audio functionality.  
+  - Classified into three roles:
+    - **Source**: produces data
+    - **Filter**: transforms data
+    - **Sink**: consumes data
 
-- **Event-System**  
-  - Meldet wichtige Zustände (EOF, Fehler, Reconfigure) an die Anwendung.
+- **Event system**  
+  - Reports key states (EOF, errors, reconfigure) to the application.
 
-### 2.2 Datenflussmodell (Pull)
+### 2.2 Dataflow model (pull)
 
-- Der **Sink** initiiert den Datenfluss, indem er Daten von seinem Upstream anfordert.
-- Jeder Filter ruft seinerseits seinen Upstream auf, bis letztlich eine Source bedient wird.
-- Daten werden in festen **Frames** verarbeitet, deren Größe global definiert ist.
+- The **sink** initiates dataflow by requesting data from its upstream.
+- Each filter calls its upstream in turn, until a source is served.
+- Data is processed in fixed **frames** with a globally defined size.
 
-Sequenz (vereinfacht):
+Sequence (simplified):
 
 ```text
-Pipeline-Thread:
+Pipeline thread:
     while (playing) {
         frame = pull_frame_from_sink();
         if (frame_size == 0) {
@@ -70,45 +70,51 @@ Pipeline-Thread:
     }
 ```
 
+Call chain (pull):
+
+```
+sink -> filter -> filter -> source
+```
+
 ---
 
-## 3. Threading & Ausführung
+## 3. Threading & Execution
 
-### 3.1 Pipeline-Thread
+### 3.1 Pipeline thread
 
-- Die Pipeline erstellt bei `audio_pipeline_start()` einen **Worker-Thread** über `k_thread_create`.
-- Dieser Thread:
-  - führt in einer Schleife Frame-Verarbeitung durch, solange ein interner `playing`-Flag gesetzt ist,
-  - läuft danach in einem Idle-/Wartezustand weiter (Thread bleibt existierend),
-  - wird nur durch `audio_pipeline_stop()`/`audio_pipeline_join()` endgültig beendet.
+- The pipeline creates a **worker thread** via `k_thread_create` in `audio_pipeline_start()`.
+- This thread:
+  - loops frame processing while an internal `playing` flag is set,
+  - then idles/waits (thread stays alive),
+  - is only terminated by `audio_pipeline_stop()`/`audio_pipeline_join()`.
 
-### 3.2 Timing-Modell (v1)
+### 3.2 Timing model (v1)
 
-- In v1 gibt es **keine explizite Timer-Taktung** innerhalb der Pipeline.
-- Der Pipeline-Thread verarbeitet Frames **so schnell wie möglich**, solange:
-  - `playing == true` ist und
-  - die Nodes Daten liefern.
-- Echtzeit-Synchronisation (z. B. I2S-Ausgabe) ist Aufgabe der Sinks:
-  - Ein Hardware-Sink kann im `process()` bei Bedarf blockieren oder intern mit eigener Taktung arbeiten.
-- Für rein dateibasierte Tests (File→File, File→Memory) ist dieser „best effort“-Durchlauf ausreichend und einfach.
+- In v1 there is **no explicit timer pacing** inside the pipeline.
+- The pipeline thread processes frames **as fast as possible** while:
+  - `playing == true`, and
+  - nodes still provide data.
+- Real-time sync (e.g., I2S output) is sink responsibility:
+  - A hardware sink may block in `process()` or pace itself internally.
+- For file-based tests (file→file, file→memory) this best-effort loop is sufficient and simple.
 
-> Hinweis: Für spätere Versionen kann ein Timer-basiertes Scheduling ergänzt werden, ist aber explizit *kein* Bestandteil von v1.
+> Note: Timer-based scheduling can be added later but is explicitly *not* part of v1.
 
-### 3.3 Concurrency-Regeln
+### 3.3 Concurrency rules
 
-- **Pipeline-API (`audio_pipeline_*`)**  
-  - Darf ausschließlich aus einem **Steuerthread** aufgerufen werden (z. B. dem Hauptthread oder einer dedizierten Control-Task).
+- **Pipeline API (`audio_pipeline_*`)**  
+  - May only be called from a **control thread** (e.g., main thread or dedicated control task).
 - **Nodes (`audio_node`)**  
-  - Werden ausschließlich vom **Pipeline-Thread** aufgerufen.  
-  - Nodes sind **nicht reentrant** und müssen keine eigene Thread-Sicherheit implementieren.
-- **Event-Queue**  
-  - Darf von der Anwendung aus beliebigen Threads gelesen werden (Zephyr-typische `k_msgq`-Semantik).
+  - Are invoked only by the **pipeline thread**.  
+  - Nodes are **not reentrant** and need no internal thread safety.
+- **Event queue**  
+  - May be read by the application from any thread (Zephyr-style `k_msgq` semantics).
 
 ---
 
-## 4. Rollenmodell: Source, Filter, Sink
+## 4. Role Model: Source, Filter, Sink
 
-### 4.1 Gemeinsamer Node-Typ
+### 4.1 Common node type
 
 ```c
 enum audio_node_role {
@@ -121,118 +127,119 @@ struct audio_node_ops {
     int (*open)(struct audio_node *node);
     ssize_t (*process)(struct audio_node *node,
                        int32_t *buf,
-                       size_t capacity,   /* in Samples */
-                       size_t *out_size); /* in Samples */
+                       size_t capacity,   /* in samples */
+                       size_t *out_size); /* in samples */
     int (*close)(struct audio_node *node);
 };
 
 struct audio_node {
     enum audio_node_role role;
     const struct audio_node_ops *ops;
-    struct audio_node *upstream; /* NULL für Sources */
-    void *context;               /* Implementierungsspezifischer Zustand */
+    struct audio_node *upstream; /* NULL for sources */
+    void *context;               /* implementation-specific state */
 };
 ```
 
-**Namensvorgabe:**  
-Die Funktionszeiger in `audio_node_ops` heißen **`open`**, **`process`**, **`close`** („opc“), wie vom Auftraggeber vorgegeben.  
+**Naming convention:**  
+The function pointers in `audio_node_ops` are named **`open`**, **`process`**, **`close`** (“opc”), as requested.
 
-**Fehlercodes:**  
-- `open()` und `close()` liefern `int` mit Zephyr-Fehlercodes (`0` bei Erfolg, `< 0` bei Fehler; z. B. `-EINVAL`, `-EIO`, `-ENOMEM`).
-- `process()` liefert `ssize_t`:
-  - `>= 0`: Anzahl der tatsächlich produzierten Samples (in `out_size` gespiegelt),
-  - `< 0`: Fehlercode (z. B. `-EIO`).
+**Error codes:**  
+- `open()` and `close()` return `int` with Zephyr error codes (`0` on success, `< 0` on failure; e.g., `-EINVAL`, `-EIO`, `-ENOMEM`).
+- `process()` returns `ssize_t`:
+  - `>= 0`: number of samples actually produced (mirrored in `out_size`),
+  - `< 0`: error code (e.g., `-EIO`).
 
-### 4.2 Source-Rolle
+### 4.2 Source role
 
 - `role == AUDIO_NODE_ROLE_SOURCE`
 - `upstream == NULL`
 - `process()`:
-  - liest Daten aus einer Quelle (Datei, Generator, etc.),
-  - füllt `buf` mit bis zu `capacity` Samples,
-  - schreibt die tatsächliche Sampleanzahl nach `*out_size`.
+  - reads data from a source (file, generator, etc.),
+  - fills `buf` with up to `capacity` samples,
+  - writes the actual sample count to `*out_size`.
 
-EOF-Konvention:
-- Bei End-of-Data: `*out_size = 0`, `process()` gibt `0` zurück.
+EOF convention:
+- At end of data: `*out_size = 0`, `process()` returns `0`.
 
-### 4.3 Filter-Rolle
+### 4.3 Filter role
 
 - `role == AUDIO_NODE_ROLE_FILTER`
 - `upstream != NULL`
 - `process()`:
-  - ruft zuerst `upstream->ops->process(...)` auf,
-  - verarbeitet die gelieferten Samples (in-place oder mit internem Scratch),
-  - schreibt die resultierende Anzahl Samples wieder in `*out_size`.
+  - first calls `upstream->ops->process(...)`,
+  - processes the delivered samples (in-place or using scratch),
+  - writes the resulting sample count back to `*out_size`.
 
-EOF-Verhalten:
-- Wenn Upstream `out_size == 0` liefert, muss der Filter:
-  - selbst `*out_size = 0` setzen,
-  - `0` zurückgeben,
-  - keine weiteren Daten mehr erzeugen.
+EOF behavior:
+- When upstream delivers `out_size == 0`, the filter must:
+  - set `*out_size = 0`,
+  - return `0`,
+  - produce no further data.
 
-### 4.4 Sink-Rolle
+### 4.4 Sink role
 
 - `role == AUDIO_NODE_ROLE_SINK`
 - `upstream != NULL`
 - `process()`:
-  - ruft `upstream->ops->process(...)` auf,
-  - verarbeitet oder konsumiert die Daten (z. B. schreibt sie in eine Datei),
-  - die Pipeline interessiert sich primär für EOF/Fehler:
-    - Wenn `*out_size == 0`: End-of-Stream erkannt.
+  - calls `upstream->ops->process(...)`,
+  - processes or consumes the data (e.g., writes to a file),
+  - the pipeline mostly cares about EOF/errors:
+    - If `*out_size == 0`: end-of-stream detected.
 
-Anmerkung:
-- Im Gegensatz zu vielen Frameworks schreibt der Sink nicht zwingend in `buf`, sondern nutzt diesen als transienten Transportpuffer.
+Note:
+- Unlike many frameworks, the sink does not have to write into `buf`; it uses it as a transient transport buffer.
 
 ---
 
-## 5. Datenformat
+## 5. Data Format
 
-### 5.1 Kanonisches internes Format
+### 5.1 Canonical internal format
 
-- Datentyp: `int32_t`
+- Data type: `int32_t`
 - Endianness: Little Endian
-- Enum-Wert: `AUDIO_SAMPLE_FORMAT_S32_LE`
-- Alle Nodes arbeiten intern mit 32‑Bit Samples.
+- Enum value: `AUDIO_SAMPLE_FORMAT_S32_LE`
+- All nodes work internally with 32-bit samples.
 
-### 5.2 gültige Bits pro Sample
+### 5.2 Valid bits per sample
 
 ```c
 struct audio_format {
-    uint32_t sample_rate;           /* Hz, z. B. 44100, 48000 */
-    uint8_t  channels;              /* v1: immer 2 */
-    uint8_t  valid_bits_per_sample; /* z. B. 16, 24, 32 */
-    enum audio_sample_format format;/* intern: AUDIO_SAMPLE_FORMAT_S32_LE */
+    uint32_t sample_rate;           /* Hz, e.g. 44100, 48000 */
+    uint8_t  channels;              /* v1: always 2 */
+    uint8_t  valid_bits_per_sample; /* e.g. 16, 24, 32 */
+    enum audio_sample_format format;/* internal: AUDIO_SAMPLE_FORMAT_S32_LE */
 };
 ```
 
-- In v1 wird `channels` fest auf **2** (Stereo) festgelegt.  
-- Die Samples sind **interleaved** im Buffer:
+- In v1 `channels` is fixed to **2** (stereo).  
+- Samples are **interleaved** in the buffer:
 
 ```text
 buf: L0, R0, L1, R1, L2, R2, ...
 ```
 
-- `valid_bits_per_sample` beschreibt die effektive Auflösung:
-  - z. B. `16` für aus 16‑Bit-PCM konvertierte Daten,
-  - `24` oder `32` bei höherer Auflösung.
+- `valid_bits_per_sample` describes the effective resolution:
+  - e.g., `16` for data converted from 16-bit PCM,
+  - `24` or `32` for higher resolution.
+- Sample rate and channel count are pipeline-wide settings defined once with the pipeline format.
 
-### 5.3 Formatkonvertierung
+### 5.3 Format conversion
 
-- Sources übernehmen die Konvertierung von ihrem Eingangsformat nach S32_LE:
-  - 16-Bit PCM → `int32_t s32 = (int32_t)s16 << 16;`
-  - 24-Bit PCM → `int32_t s32 = (int32_t)s24 << 8;`
-- Sinks konvertieren S32_LE zurück in ihr Ziel-Format:
-  - z. B. `int16_t s16 = (int16_t)(s32 >> 16);`
+- Sources handle conversion from their input format to S32_LE:
+  - 16-bit PCM → `int32_t s32 = (int32_t)s16 << 16;`
+  - 24-bit PCM → `int32_t s32 = (int32_t)s24 << 8;`
+- Sinks convert S32_LE back to their target format:
+  - e.g., `int16_t s16 = (int16_t)(s32 >> 16);`
 
-Filter erwarten und produzieren ausschließlich S32_LE.
+Filters expect and produce S32_LE only.
 
 ---
 
-## 6. Pipeline-Objekt
+## 6. Pipeline Object
 
-### 6.1 Struktur
+### 6.1 Structure
 
-Ein möglicher Entwurf für `struct audio_pipeline` (Details können in der Implementierung variieren, sollten aber diese Elemente enthalten):
+One possible design for `struct audio_pipeline` (details may vary but should include these elements):
 
 ```c
 struct audio_pipeline {
@@ -249,7 +256,7 @@ struct audio_pipeline {
     int priority;
 
     int32_t *frame_buffer;
-    size_t frame_capacity; /* in Samples */
+    size_t frame_capacity; /* in samples */
 
     struct k_msgq *event_queue;
 
@@ -259,9 +266,9 @@ struct audio_pipeline {
 };
 ```
 
-### 6.2 Statische Definition
+### 6.2 Static definition
 
-Die Pipeline wird statisch über ein Makro definiert, z. B.:
+The pipeline is defined statically via a macro, e.g.:
 
 ```c
 AUDIO_PIPELINE_DEFINE(my_pipeline,
@@ -270,21 +277,21 @@ AUDIO_PIPELINE_DEFINE(my_pipeline,
     .priority      = CONFIG_AUDIO_PIPELINE_PRIORITY);
 ```
 
-Das Makro:
-- legt `struct audio_pipeline my_pipeline` an,
-- erzeugt `K_THREAD_STACK_DEFINE` für den Pipeline-Thread,
-- erzeugt einen statischen Frame-Puffer:
+The macro:
+- instantiates `struct audio_pipeline my_pipeline`,
+- creates `K_THREAD_STACK_DEFINE` for the pipeline thread,
+- creates a static frame buffer:
   ```c
   static int32_t my_pipeline_frame_buf[CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES * 2];
   ```
-  (2 = Kanäle),
-- verknüpft diese mit der Pipeline-Struktur.
+  (2 = channels),
+- ties these to the pipeline struct.
 
 ---
 
-## 7. Kconfig-Optionen
+## 7. Kconfig Options
 
-Minimaler Satz an Konfigurationsoptionen:
+Minimal set of configuration options:
 
 ```kconfig
 config AUDIO_PIPELINE
@@ -306,9 +313,9 @@ config AUDIO_PIPELINE_PRIORITY
 
 ---
 
-## 8. Pipeline-API
+## 8. Pipeline API
 
-### 8.1 Initialisierung & Konfiguration
+### 8.1 Initialization & configuration
 
 ```c
 int audio_pipeline_init(struct audio_pipeline *pl);
@@ -323,41 +330,41 @@ int audio_pipeline_set_format(struct audio_pipeline *pl,
                               const struct audio_format *fmt);
 ```
 
-Vereinbarungen:
+Agreements:
 
 - `audio_pipeline_init()`:
-  - setzt interne Flags,
-  - initialisiert Event-Queue,
-  - darf nur einmal pro Pipeline-Instanz aufgerufen werden.
+  - sets internal flags,
+  - initializes the event queue,
+  - may be called only once per pipeline instance.
 - `audio_pipeline_set_nodes()`:
-  - legt `source`, Filterliste und `sink` fest,
-  - verkettet intern `upstream`-Zeiger (Filter[i].upstream = (i==0 ? source : Filter[i-1]); sink.upstream = letzter Filter oder Source).
+  - assigns `source`, filter list, and `sink`,
+  - internally links `upstream` pointers (Filter[i].upstream = (i==0 ? source : Filter[i-1]); sink.upstream = last filter or source).
 - `audio_pipeline_set_format()`:
-  - setzt das für die gesamte Pipeline gültige `audio_format`.  
-  - v1: Format ist statisch für gesamte Laufzeit.
+  - sets the `audio_format` valid for the whole pipeline.  
+  - v1: format is static for the entire runtime.
 
 ### 8.2 Lifecycle
 
 ```c
 int audio_pipeline_start(struct audio_pipeline *pl);
 int audio_pipeline_play(struct audio_pipeline *pl);
-int audio_pipeline_stop(struct audio_pipeline *pl); /* stoppt Playing */
-int audio_pipeline_join(struct audio_pipeline *pl); /* optional: Thread Ende abwarten */
+int audio_pipeline_stop(struct audio_pipeline *pl); /* stops playing */
+int audio_pipeline_join(struct audio_pipeline *pl); /* optional: wait for thread end */
 ```
 
-Empfohlenes Verhalten:
+Recommended behavior:
 
 - `audio_pipeline_start()`:
-  - erstellt den Thread (falls nicht bereits existierend),
-  - öffnet alle Nodes via `node->ops->open`.
+  - creates the thread (if not already existing),
+  - opens all nodes via `node->ops->open`.
 - `audio_pipeline_play()`:
-  - setzt `pl->playing = true`,
-  - der Pipeline-Thread beginnt Frames zu ziehen.
+  - sets `pl->playing = true`,
+  - pipeline thread begins pulling frames.
 - `audio_pipeline_stop()`:
-  - setzt `pl->playing = false`,
-  - Thread bleibt existierend, aber im Idle/Wartezustand.
+  - sets `pl->playing = false`,
+  - thread stays alive but idles/waits.
 - `audio_pipeline_join()`:
-  - optional: beendet Thread (für Clean-up-Szenarien).
+  - optional: ends thread (cleanup scenarios).
 
 ### 8.3 Events
 
@@ -370,11 +377,11 @@ enum audio_pipeline_event_type {
 
 struct audio_pipeline_event {
     enum audio_pipeline_event_type type;
-    int error; /* optional: Fehlercode bei ERROR */
+    int error; /* optional: error code for ERROR */
 };
 ```
 
-API (Beispiel):
+API (example):
 
 ```c
 int audio_pipeline_get_event(struct audio_pipeline *pl,
@@ -382,44 +389,44 @@ int audio_pipeline_get_event(struct audio_pipeline *pl,
                              k_timeout_t timeout);
 ```
 
-Verhalten:
+Behavior:
 
-- EOF: Sobald ein Sink `out_size == 0` erhält, wird ein `AUDIO_PIPELINE_EVENT_EOF` erzeugt.
-- ERROR: Wenn ein Node `process()` oder `open()`/`close()` < 0 zurückgibt, erzeugt die Pipeline `AUDIO_PIPELINE_EVENT_ERROR` und setzt `evt.error` entsprechend.
+- EOF: As soon as a sink receives `out_size == 0`, an `AUDIO_PIPELINE_EVENT_EOF` is generated.
+- ERROR: If any node returns < 0 from `process()` or `open()`/`close()`, the pipeline generates `AUDIO_PIPELINE_EVENT_ERROR` and sets `evt.error` accordingly.
 
 ---
 
-## 9. Verhalten bei EOF & Fehlern
+## 9. EOF & Error Behavior
 
 ### 9.1 EOF
 
-- Quelle signalisiert EOF mit `out_size == 0` und Rückgabewert `0`.
-- Filter propagieren diesen Zustand unverändert weiter.
-- Sink erkennt EOF, informiert die Pipeline.
+- Source signals EOF with `out_size == 0` and return value `0`.
+- Filters propagate this state unchanged.
+- Sink detects EOF and informs the pipeline.
 - Pipeline:
-  - setzt `playing = false`,
-  - erzeugt `AUDIO_PIPELINE_EVENT_EOF`.
+  - sets `playing = false`,
+  - generates `AUDIO_PIPELINE_EVENT_EOF`.
 
-### 9.2 Fehler
+### 9.2 Errors
 
-- Jeder negative Rückgabewert aus `open()`, `process()`, `close()` ist ein Fehler.
-- Beim ersten Fehler:
-  - stoppt die Pipeline die weitere Frame-Verarbeitung (`playing = false`),
-  - erzeugt `AUDIO_PIPELINE_EVENT_ERROR`,
-  - optional: führt ein `close()` auf allen Nodes aus.
+- Any negative return value from `open()`, `process()`, `close()` is an error.
+- On the first error:
+  - pipeline stops further frame processing (`playing = false`),
+  - generates `AUDIO_PIPELINE_EVENT_ERROR`,
+  - optionally invokes `close()` on all nodes.
 
 ---
 
-## 10. Beispielnodes (v1)
+## 10. Example Nodes (v1)
 
-### 10.1 File Reader Node (Source)
+### 10.1 File reader node (source)
 
-- Aufgabe:
-  - Öffnet eine WAV-Datei (z. B. über RAMFS oder LittleFS),
-  - liest den Header (nur PCM, Stereo, 16 Bit),
-  - liefert S16-Daten als S32_LE an die Pipeline.
+- Task:
+  - Opens a WAV file (e.g., via RAMFS or LittleFS),
+  - parses the header (PCM, stereo, 16-bit),
+  - delivers S16 data as S32_LE into the pipeline.
 
-- Kontextstruktur (Beispiel):
+- Context struct (example):
 
 ```c
 struct file_reader_context {
@@ -433,94 +440,94 @@ struct file_reader_context {
 ```
 
 - `open()`:
-  - Datei öffnen,
-  - Header parsen,
-  - `fmt` setzen,
+  - open file,
+  - parse header,
+  - set `fmt`,
   - `bytes_read = 0`, `eof = false`.
 - `process()`:
-  - liest `capacity` * 2 (Kanäle) * 2 (Bytes pro Sample) aus der Datei,
-  - konvertiert `int16_t` → `int32_t` in `buf`,
-  - setzt `*out_size` (in Samples, nicht in Bytes).
+  - reads `capacity` * 2 (channels) * 2 (bytes per sample) from file,
+  - converts `int16_t` → `int32_t` into `buf`,
+  - sets `*out_size` (in samples, not bytes).
 - `close()`:
-  - Datei schließen.
+  - close file.
 
-### 10.2 File Writer Node (Sink)
+### 10.2 File writer node (sink)
 
-- Aufgabe:
-  - Nimmt S32_LE entgegen,
-  - konvertiert auf gewünschtes Ausgabeformat (z. B. 16 Bit PCM),
-  - schreibt in Datei.
+- Task:
+  - Accepts S32_LE,
+  - converts to desired output format (e.g., 16-bit PCM),
+  - writes to file.
 
-Implementation analog zum Reader, nur umgekehrt.
+Implementation mirrors the reader, in reverse.
 
 ---
 
-## 11. Speicher- und Modulstruktur
+## 11. Memory & Module Structure
 
-### 11.1 Keine dynamische Allokation
+### 11.1 No dynamic allocation
 
-- Innerhalb des Subsystems wird **keine** dynamische Speicherallokation (`k_malloc`, `k_calloc`, `k_free`) verwendet.
-- Alle Strukturen (Pipeline, Nodes, Kontexte, Puffer) sind statisch definiert oder vom Nutzer bereitgestellt.
+- Within the subsystem there is **no** dynamic allocation (`k_malloc`, `k_calloc`, `k_free`).
+- All structures (pipeline, nodes, contexts, buffers) are static or user-provided.
 
-### 11.2 Makros zur Definition
+### 11.2 Definition macros
 
 - `AUDIO_PIPELINE_DEFINE(name, ...)`  
-  - legt Pipeline + Thread-Stack + Frame-Buffer an.
+  - allocates pipeline + thread stack + frame buffer.
 - `FILE_READER_NODE_DEFINE(name, path)`  
-  - legt `struct audio_node` und `struct file_reader_context` statisch an.
+  - statically allocates `struct audio_node` and `struct file_reader_context`.
 
-Konkrete Makros können im Implementierungsdesign ausgearbeitet werden, sollen aber dieses Prinzip einhalten.
+Concrete macros can be refined during implementation but must honor this principle.
 
 ---
 
-## 12. Teststrategie
+## 12. Test Strategy
 
-### 12.1 Ziel
+### 12.1 Goal
 
-- Tests sollen vollständig auf **QEMU** laufen, ohne reale Audio-Hardware.
-- Fokus auf:
-  - Korrekte Datenweitergabe,
-  - EOF-Verhalten,
-  - Fehlerpfade.
+- Tests should run entirely on **QEMU**, without real audio hardware.
+- Focus on:
+  - Correct data propagation,
+  - EOF behavior,
+  - Error paths.
 
-### 12.2 Roundtrip-Test
+### 12.2 Roundtrip test
 
-Beispiel-Testaufbau:
+Example setup:
 
 ```text
 [file_reader_source] -> [optional filter] -> [file_writer_sink]
 ```
 
-Testschritte:
+Test steps:
 
-1. Bekannte WAV-Datei (Golden Master) in RAMFS einbinden.
-2. Pipeline laufen lassen, bis EOF.
-3. Ausgabedatei mit Golden-Master vergleichen:
-   - Dateigröße identisch,
-   - Byte-für-Byte identisch.
+1. Mount a known WAV file (golden master) in RAMFS.
+2. Run the pipeline until EOF.
+3. Compare output file against the golden master:
+   - File size identical,
+   - Byte-for-byte identical.
 
-### 12.3 Negative Tests
+### 12.3 Negative tests
 
-- Beschädigter WAV-Header → `open()` muss Fehler liefern.
-- Frühzeitiges EOF → Pipeline muss sauber EOF-Event liefern.
-- Simulierte I/O-Fehler → ERROR-Event.
+- Corrupted WAV header → `open()` must fail.
+- Early EOF → pipeline must emit a clean EOF event.
+- Simulated I/O errors → ERROR event.
 
 ---
 
-## 13. Erweiterungspunkte für spätere Versionen
+## 13. Extension Points for Later Versions
 
-- **Float-DSP**:
-  - Einführen von Converter-Nodes `s32_to_float`, `float_to_s32`.
-- **Mehrkanal-Unterstützung**:
-  - Aufhebung der 2‑Kanal-Einschränkung.
+- **Float DSP**:
+  - Introduce converter nodes `s32_to_float`, `float_to_s32`.
+- **Multi-channel support**:
+  - Lift the 2-channel restriction.
 - **Mixer/Splitter**:
-  - Erweiterung des Node-Modells um mehrere Upstreams/Downstreams.
-- **Timer-getaktete Pipeline**:
-  - Optionaler Modus, der Frames in Echtzeit basierend auf Sample-Rate ausgibt.
+  - Extend the node model to multiple upstream/downstream links.
+- **Timer-paced pipeline**:
+  - Optional mode that emits frames in real time based on sample rate.
 
 ---
 
-## 14 Projektstruktur
+## 14 Project Structure
 
 ```
 
@@ -571,17 +578,17 @@ zephyr-audio-pipeline/
 ```
 
 
-## 15. Zusammenfassung
+## 15. Summary
 
-Diese Spezifikation definiert:
+This specification defines:
 
-- Ein Pull-basiertes Audio-Pipeline-System,
-- mit einem Worker-Thread pro Pipeline,
-- statischer Speicherallokation,
-- 32‑Bit internem Sampleformat (S32_LE),
-- klaren Rollen (Source/Filter/Sink),
-- vorgegebenem EOF- und Fehlerverhalten,
-- Zephyr-konformer API und Fehlercodes,
-- und einem einfachen, aber erweiterbaren Event-System.
+- A pull-based audio pipeline system,
+- with one worker thread per pipeline,
+- static memory allocation,
+- 32-bit internal sample format (S32_LE),
+- clear roles (source/filter/sink),
+- prescribed EOF and error behavior,
+- Zephyr-style API and error codes,
+- and a simple yet extensible event system.
 
-Sie stellt den vollständigen technischen Vertrag dar, an den sich die Implementierung halten soll.
+It forms the complete technical contract that the implementation must follow.

@@ -1,10 +1,10 @@
-cmake_minimum_required(VERSION 3.13)
-project(zephyr_audio_toolkit C)
+cmake_minimum_required(VERSION 3.20.0)
 
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_STANDARD_REQUIRED ON)
+if (NOT DEFINED ZEPHYR_BASE)
+	message(STATUS "ZEPHYR_BASE not set; this module is intended for Zephyr builds.")
+	return()
+endif()
 
-add_subdirectory(src)
+project(zephyr_audio_pipeline)
 
-enable_testing()
-add_subdirectory(tests)
+add_subdirectory(subsys/audio/pipeline)

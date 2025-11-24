@@ -1,0 +1,27 @@
+menuconfig AUDIO_PIPELINE
+	bool "Zephyr audio pipeline"
+	help
+	  Enable the pull-based audio pipeline subsystem and helper nodes.
+
+if AUDIO_PIPELINE
+
+config AUDIO_PIPELINE_FRAME_SAMPLES
+	int "Samples per frame"
+	default 128
+	range 1 1024
+	help
+	  Frame size processed by the pipeline thread in one iteration.
+
+config AUDIO_PIPELINE_THREAD_PRIO
+	int "Pipeline thread priority"
+	default 5
+	help
+	  Priority assigned to the pipeline worker thread.
+
+config AUDIO_PIPELINE_THREAD_STACK_SIZE
+	int "Pipeline thread stack size"
+	default 2048
+	help
+	  Stack size for the pipeline worker thread.
+
+endif

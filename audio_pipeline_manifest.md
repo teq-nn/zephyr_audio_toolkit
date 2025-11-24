@@ -1,131 +1,173 @@
 # Audio Pipeline Manifest (Zephyr-Compatible)
 
-Dieses Manifest definiert alle Architekturentscheidungen, die wir gemeinsam festgelegt haben.  
-Es dient als verbindlicher technischer Vertrag („Engineering Contract“) für die weitere Entwicklung.
+This manifest captures all architectural decisions we agreed on.  
+It acts as the binding engineering contract for ongoing development.
 
 ---
 
-## 1. Grundprinzipien
+## 1. Core Principles
 
-- Das System basiert auf einem **Pull-Modell**.
-- Daten werden immer vom **Sink** initiiert, der Samples von seinem Upstream anfordert.
-- Jeder Node (Source, Filter, Sink) implementiert eine passive `process()`-Funktion, die nur ausgeführt wird, wenn der Pipeline-Thread sie aufruft.
-- Es gibt **keine Tasks pro Node**.
+- The system uses a **pull model**.
+- Data flow is always initiated by the **sink**, which requests samples from its upstream node.
+- Every node (source, filter, sink) implements a passive `process()` function that only runs when invoked by the pipeline thread.
+- There are **no per-node tasks**.
 
 ---
 
-## 2. Rollen: Source, Filter, Sink
+## 2. Roles: Source, Filter, Sink
 
 ### Source  
-- Hat **keinen Upstream**.  
-- Erzeugt Daten (z. B. File Reader, Generator).  
-- Benötigt keinen Input-Buffer, schreibt aber in den vom Caller bereitgestellten Buffer.
+- Has **no upstream**.  
+- Produces data (e.g., file reader, generator).  
+- Needs no input buffer, writes into the caller-provided buffer.
 
 ### Filter  
-- Hat **genau einen Upstream**.  
-- Liest Daten vom Upstream und verarbeitet sie in-place oder mit internem Scratch-Puffer.  
-- Kann Analyzer, Decoder, DSP, Resampler etc. sein.
+- Has **exactly one upstream**.  
+- Reads data from upstream and processes it in-place or with an internal scratch buffer.  
+- Can be an analyzer, decoder, DSP, resampler, etc.
 
 ### Sink  
-- Ist der **Startpunkt des Pull-Zyklus**.  
-- Ruft die gesamte Kette von Upstream-Nodes auf.  
-- Verbraucht die finalen Daten (z. B. File Writer, Hardware-Sink, Test-Sink).
+- Is the **start point of the pull cycle**.  
+- Invokes the entire chain of upstream nodes.  
+- Consumes final data (e.g., file writer, hardware sink, test sink).
 
 ---
 
-## 3. Thread-Modell
+## 3. Thread Model
 
-- Die Pipeline besitzt **einen eigenen Worker-Thread**, der im Hintergrund läuft.
-- Dieser Thread wird bei `audio_pipeline_start()` erstellt.
-- Der Thread bleibt bestehen, selbst wenn ein Track / eine Audioquelle endet.
-- Mehrere Songs können ohne Neustart des Threads verarbeitet werden.
+- The pipeline owns **one worker thread** that runs in the background.
+- This thread is created via `audio_pipeline_start()`.
+- The thread persists even when a track / source ends.
+- Multiple tracks can be processed without restarting the thread.
 
 ---
 
-## 4. Datenformat (Kanonisches Format)
+## 4. Data Format (Canonical)
 
-### Internes Containerformat:
-- **int32_t** pro Sample  
+### Internal container format:
+- **int32_t** per sample  
 - Little Endian  
 - Enum: `AUDIO_SAMPLE_FORMAT_S32_LE`  
-- Dieses Format gilt **global und immer** innerhalb der Pipeline.
+- This format is **global and always used** inside the pipeline.
 
-### Valid Bits:
-- Die tatsächliche Auflösung (z. B. 16, 24, 32 Bit) wird über `valid_bits_per_sample` gespeichert.
-- Filter sehen immer 32-Bit-Containerwerte.
+### Valid bits:
+- The actual resolution (e.g., 16, 24, 32 bits) is stored in `valid_bits_per_sample`.
+- Filters always see 32-bit container values.
 
-### Konvertierung:
-- Alle Sources konvertieren eingehende Formate (z. B. WAV 16 Bit) → 32 Bit.  
-- Alle Sinks konvertieren zurück, falls nötig.
+### Conversion:
+- All sources convert inbound formats (e.g., WAV 16-bit) → 32-bit.  
+- All sinks convert back if needed.
 
 ---
 
-## 5. Frame-Größe & Timing
+## 5. Frame Size & Timing
 
-- Die globale Frame-Größe wird über **Kconfig** definiert:  
+- Global frame size is defined via **Kconfig**:  
   `CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES`
-- Diese Größe bestimmt die Latenz und den Workload pro Prozesszyklus.
-- Die Pipeline ruft `process()` für jeden Node einmal pro Frame auf.
+- This size governs latency and workload per processing cycle.
+- The pipeline calls `process()` once per node per frame.
 
 ---
 
-## 6. Buffer-Strategie
+## 6. Buffer Strategy
 
-- **Keine dynamischen Allokationen (`k_malloc`) innerhalb des Subsystems.**
-- Alle Pipeline- und Node-Strukturen werden **statisch** über Makros erzeugt.
-- Der Pipeline-Thread verwendet einen **gemeinsamen Frame-Buffer**, der ebenfalls statisch angelegt wird.
-- Nodes dürfen **interne Scratch-Buffer** haben, ebenfalls statisch (über DEFINE-Makros).
-
----
-
-## 7. Pipeline-Verhalten bei EOF
-
-- Wenn ein Source „keine Daten mehr“ liefern kann (`out_size = 0`), gilt dies als **EOL / EOF**.
-- Filter geben EOL unverändert weiter.
-- Sink erzeugt ein **EOF-Ereignis** (über Message-Queue oder Callback).
-- Die Audio-Verarbeitung stoppt, aber **der Thread läuft weiter** im Idle-Modus.
+- **No dynamic allocations (`k_malloc`) inside the subsystem.**
+- All pipeline and node structures are **static**, created via macros.
+- The pipeline thread uses a **shared frame buffer**, also static.
+- Nodes may have **internal scratch buffers**, also static (via DEFINE macros).
 
 ---
 
-## 8. Event-Handling
+## 7. Pipeline Behavior at EOF
 
-- Die Pipeline erzeugt Events für:
+- When a source cannot deliver more data (`out_size = 0`), this counts as **EOL / EOF**.
+- Filters forward EOF unchanged.
+- The sink raises an **EOF event** (via message queue or callback).
+- Audio processing stops, but **the thread keeps running** in idle mode.
+
+---
+
+## 8. Event Handling
+
+- The pipeline emits events for:
   - `AUDIO_PIPELINE_EVENT_EOF`
   - `AUDIO_PIPELINE_EVENT_ERROR`
   - `AUDIO_PIPELINE_EVENT_RECONFIG`
-- Events werden über eine interne `k_msgq` nach außen gereicht oder optional via Callback.
+- Events are exposed via an internal `k_msgq` or optionally via callback.
 
 ---
 
-## 9. Speicher- und API-Design
+## 9. Memory and API Design
 
-- Nodes werden per `NODE_DEFINE`-Makros erzeugt (statische Allokation).
-- Die Pipeline wird über `AUDIO_PIPELINE_DEFINE()` erzeugt (statischer Thread, Buffer, Kontext).
-- Der Anwender muss **keine Pointer auf Puffer** bereitstellen.
-- Alles ist vollständig statisch allokiert und deterministisch.
-
----
-
-## 10. Erweiterbarkeit
-
-- Float-Support ist möglich, aber ausschließlich über **explizite Converter-Nodes** (`float_to_s32`, `s32_to_float`).
-- Formatänderungen im laufenden Betrieb geschehen nur explizit.
-- Spätere Multi-Input- oder Multi-Output-Nodes (Mixer, Splitter) sind kompatibel mit diesem Modell.
+- Nodes are created via `NODE_DEFINE` macros (static allocation).
+- The pipeline is created via `AUDIO_PIPELINE_DEFINE()` (static thread, buffer, context).
+- The user does **not** need to supply buffer pointers.
+- Everything is fully statically allocated and deterministic.
 
 ---
 
-## 11. Zusammenfassung
+## 10. Extensibility
 
-Dieses Manifest definiert die Architektur der Audio-Pipeline vollständig:
+- Float support is possible but only via **explicit converter nodes** (`float_to_s32`, `s32_to_float`).
+- Format changes at runtime happen only explicitly.
+- Future multi-input or multi-output nodes (mixers, splitters) fit this model.
 
-- Pull-Modell  
-- Ein Pipeline-Thread  
-- Nodes sind passiv, keine eigenen Threads  
-- Statische Speicherstrategie  
-- Kanonisches 32-Bit-Sampleformat  
-- Globale Frame-Größe  
-- EOL wird sauber propagiert, Thread bleibt bestehen  
-- Event-System über Message Queue  
-- API und interne Datenstrukturen sind deterministisch und MCU-freundlich  
+---
 
-Dieses Dokument ist unser gemeinsamer Architekturvertrag.
+## 11. Summary
+
+This manifest fully defines the audio pipeline architecture:
+
+- Pull model  
+- One pipeline thread  
+- Nodes are passive, no own threads  
+- Static memory strategy  
+- Canonical 32-bit sample format  
+- Global frame size  
+- EOL propagates cleanly, thread stays alive  
+- Event system via message queue  
+- API and internals are deterministic and MCU-friendly  
+
+---
+
+## 12. Project Structure
+
+The implementation follows the layout defined in the specification:
+
+```
+zephyr-audio-pipeline/
+├─ module.yml
+├─ CMakeLists.txt
+├─ Kconfig
+├─ include/zephyr/audio/
+│  ├─ audio_format.h
+│  ├─ audio_node.h
+│  ├─ audio_pipeline.h
+│  └─ audio_pipeline_events.h
+├─ subsys/audio/pipeline/
+│  ├─ CMakeLists.txt
+│  ├─ Kconfig
+│  ├─ audio_pipeline_core.c
+│  ├─ audio_pipeline_config.c
+│  ├─ audio_pipeline_events.c
+│  ├─ audio_node_core.c
+│  ├─ audio_internal.h
+│  ├─ nodes/
+│  │   ├─ file_reader_node.c
+│  │   ├─ file_writer_node.c
+│  │   ├─ gain_filter_node.c
+│  │   └─ null_sink_node.c
+│  └─ util/
+│      ├─ wav_parser.c
+│      └─ wav_parser.h
+├─ samples/audio/pipeline_basic/
+│  ├─ CMakeLists.txt
+│  ├─ Kconfig
+│  └─ src/main.c
+└─ tests/subsys/audio/pipeline/
+   ├─ CMakeLists.txt
+   ├─ Kconfig
+   ├─ test_roundtrip.c
+   └─ test_error_paths.c
+```
+This document is our shared engineering contract.

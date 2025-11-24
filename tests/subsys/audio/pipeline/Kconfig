@@ -1,0 +1,5 @@
+config TEST_AUDIO_PIPELINE
+	bool "Enable audio pipeline tests"
+	default y
+	help
+	  Build the unit tests for the audio pipeline subsystem.
