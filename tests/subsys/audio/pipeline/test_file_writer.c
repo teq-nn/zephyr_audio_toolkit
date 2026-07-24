@@ -65,6 +65,7 @@ AUDIO_FILE_WRITER_NODE_DEFINE(depth_writer, &hdr_source, AUDIO_TEST_PATH("w_dept
 AUDIO_FILE_WRITER_NODE_DEFINE(chan_writer, &hdr_source, AUDIO_TEST_PATH("w_chan.wav"));
 /* A directory that does not exist: the filesystem has to reject open(). */
 AUDIO_FILE_WRITER_NODE_DEFINE(nodir_writer, &hdr_source, AUDIO_TEST_PATH("nodir/w.wav"));
+/* No upstream at all: a wiring error the pull has to reject. */
 AUDIO_FILE_WRITER_NODE_DEFINE(orphan_writer, NULL, AUDIO_TEST_PATH("w_orphan.wav"));
 /* Never opened by any case, so process() has to refuse it. */
 AUDIO_FILE_WRITER_NODE_DEFINE(unopened_writer, &hdr_source, AUDIO_TEST_PATH("w_unopened.wav"));
@@ -178,7 +179,6 @@ ZTEST(audio_pipeline_file_writer, test_sink_writes_valid_wav)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_file_writer_state *state = hdr_writer.state;
 	size_t produced = 0;
@@ -207,7 +207,6 @@ ZTEST(audio_pipeline_file_writer, test_sink_writes_configured_format)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_file_writer_state *state = fmt_writer.state;
 	size_t produced = 0;
@@ -281,7 +280,6 @@ ZTEST(audio_pipeline_file_writer, test_sink_close_finalises_and_allows_reopen)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_file_writer_state *state = reopen_writer.state;
 	size_t produced = 0;
@@ -329,7 +327,6 @@ ZTEST(audio_pipeline_file_writer, test_sink_narrows_s32_to_s16)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	size_t produced = 0;
 	size_t i;
@@ -371,7 +368,6 @@ ZTEST(audio_pipeline_file_writer, test_sink_rejects_partial_sample_frame)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_file_writer_state *state = odd_writer.state;
 	size_t produced = 1;
@@ -408,7 +404,6 @@ ZTEST(audio_pipeline_file_writer, test_sink_propagates_eof_without_appending)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_file_writer_state *state = eof_writer.state;
 	const uint32_t expected = 4U * sizeof(int16_t);
@@ -446,21 +441,24 @@ ZTEST(audio_pipeline_file_writer, test_sink_propagates_eof_without_appending)
 			 WRITER_DEFAULT_CHANNELS, expected);
 }
 
-ZTEST(audio_pipeline_file_writer, test_sink_without_upstream_reports_eof)
+ZTEST(audio_pipeline_file_writer, test_sink_without_upstream_is_a_wiring_error)
 {
 	int32_t buf[WRITER_FRAME_SAMPLES];
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	size_t produced = 1;
+	int ret;
 
 	zassert_equal(audio_node_open(&orphan_writer), 0, "open failed");
 
-	zassert_equal(audio_node_process(&orphan_writer, &view, &produced), 0,
-		      "a sink without upstream must report a clean EOF");
-	zassert_equal(produced, 0U, "EOF must report out_size == 0");
+	/* Spec §4.4: a sink has an upstream. A missing one is a wiring error,
+	 * and reporting it as a clean EOF would swallow the track silently.
+	 */
+	ret = audio_node_process(&orphan_writer, &view, &produced);
+	zassert_equal(ret, -ENOTSUP, "a sink without upstream must report -ENOTSUP, got %d", ret);
+	zassert_equal(produced, 0U, "a failing process() must not claim samples");
 
 	zassert_equal(audio_node_close(&orphan_writer), 0, "close failed");
 	assert_valid_wav(AUDIO_TEST_PATH("w_orphan.wav"), WRITER_DEFAULT_RATE,
@@ -473,7 +471,6 @@ ZTEST(audio_pipeline_file_writer, test_sink_process_without_open_fails)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	size_t produced = 1;
 	int ret;
@@ -494,7 +491,6 @@ ZTEST(audio_pipeline_file_writer, test_sink_reports_write_error_and_leaves_empty
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_file_writer_state *state = abort_writer.state;
 	struct audio_wav_header wav;

@@ -428,7 +428,6 @@ ZTEST(audio_pipeline_static_define, test_node_define_gain_state_is_per_instance)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	size_t produced = 0;
 
@@ -460,7 +459,6 @@ ZTEST(audio_pipeline_static_define, test_node_define_reader_state_is_per_instanc
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	size_t produced = 0;
 	struct audio_file_reader_state *state_a = reader_a.state;

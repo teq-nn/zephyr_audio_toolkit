@@ -101,6 +101,9 @@ struct audio_fake_source {
  * The ops pull the upstream chain and count what comes back, which is exactly
  * what a pass-through filter does as well - a node using them may therefore
  * take either ::AUDIO_NODE_ROLE_SINK or ::AUDIO_NODE_ROLE_FILTER.
+ *
+ * The pull goes through audio_node_pull() like a shipped node's does, so a fake
+ * wired without an upstream reports @c -ENOTSUP rather than end of stream.
  */
 struct audio_fake_sink {
 	/* --- Script: set by the test thread before the run. --------------- */
@@ -109,6 +112,14 @@ struct audio_fake_sink {
 	int open_ret;
 	/** Value close() returns. */
 	int close_ret;
+	/**
+	 * 1-based frame at which process() fails with @ref process_ret before it
+	 * pulls; 0 disables the failure injection. Models a node that breaks in
+	 * its own body rather than below.
+	 */
+	size_t fail_at_frame;
+	/** Error returned at @ref fail_at_frame. */
+	int process_ret;
 	/** Check every sample of a frame against @ref expect_pattern. */
 	bool check_pattern;
 	/** Container value every sample must carry when @ref check_pattern. */

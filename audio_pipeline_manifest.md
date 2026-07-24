@@ -31,6 +31,14 @@ It acts as the binding engineering contract for ongoing development.
 - Invokes the entire chain of upstream nodes.  
 - Consumes final data (e.g., file writer, hardware sink, test sink).
 
+### Reading from upstream
+- A filter and a sink read their upstream through **one shared pull helper**, never by invoking the
+  upstream node's `process()` themselves. The helper owns the questions every node would otherwise
+  answer for itself: a **missing upstream is a wiring error** (`-ENOTSUP`, never an empty track),
+  `-EPIPE` from below is never passed on (§7), and end of stream travels up unchanged.
+- The helper does **not** walk the chain: each node still decides *when* and *how often* it pulls,
+  which is what keeps a resampler (N in, M out) and a later mixer (several upstreams) possible.
+
 ---
 
 ## 3. Thread Model
@@ -89,9 +97,15 @@ It acts as the binding engineering contract for ongoing development.
 ## 7. Pipeline Behavior at EOF
 
 - When a source cannot deliver more data (`out_size = 0`), this counts as **EOL / EOF**.
+- The frame size is reported **only** through the `out_size` out-parameter; the frame buffer handed
+  around describes storage and capacity and carries no size of its own, so there is one place to
+  write it and one place to read it.
 - Filters forward EOF unchanged.
 - The sink raises an **EOF event** (via message queue or callback).
 - Audio processing stops, but **the thread keeps running** in idle mode.
+- `-EPIPE` is **reserved** for this end-of-stream signal inside the pipeline. No node may report it
+  as a failure: every boundary an error can enter through - an upstream node, a filesystem, the sink
+  itself - remaps it to `-EIO`, so a broken node can never masquerade as a finished track.
 
 ---
 

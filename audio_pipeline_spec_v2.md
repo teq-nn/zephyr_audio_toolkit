@@ -123,12 +123,16 @@ enum audio_node_role {
     AUDIO_NODE_ROLE_SINK,
 };
 
+struct audio_buffer_view {
+    int32_t *data;     /* frame buffer, owned by the pipeline */
+    size_t   capacity; /* samples the buffer can hold */
+};
+
 struct audio_node_ops {
     int (*open)(struct audio_node *node);
-    ssize_t (*process)(struct audio_node *node,
-                       int32_t *buf,
-                       size_t capacity,   /* in samples */
-                       size_t *out_size); /* in samples */
+    int (*process)(struct audio_node *node,
+                   struct audio_buffer_view *buf,
+                   size_t *out_size); /* in samples */
     int (*close)(struct audio_node *node);
 };
 
@@ -136,7 +140,7 @@ struct audio_node {
     enum audio_node_role role;
     const struct audio_node_ops *ops;
     struct audio_node *upstream; /* NULL for sources */
-    void *context;               /* implementation-specific state */
+    void *state;                 /* implementation-specific state */
 };
 ```
 
@@ -144,10 +148,29 @@ struct audio_node {
 The function pointers in `audio_node_ops` are named **`open`**, **`process`**, **`close`** (“opc”), as requested.
 
 **Error codes:**  
-- `open()` and `close()` return `int` with Zephyr error codes (`0` on success, `< 0` on failure; e.g., `-EINVAL`, `-EIO`, `-ENOMEM`).
-- `process()` returns `ssize_t`:
-  - `>= 0`: number of samples actually produced (mirrored in `out_size`),
-  - `< 0`: error code (e.g., `-EIO`).
+- `open()`, `process()` and `close()` return `int` with Zephyr error codes (`0` on success, `< 0` on failure; e.g., `-EINVAL`, `-EIO`, `-ENOMEM`).
+- On success `process()` reports the number of samples actually produced in `*out_size`; `0` means end of stream.
+
+**One size, one place:**
+The frame size travels **only** through `*out_size`. `audio_buffer_view` describes the buffer (`data`, `capacity`) and nothing else, so a node has exactly one field to write and a caller exactly one field to read.
+
+### 4.1.1 Pulling from upstream
+
+Reading a frame from upstream has exactly one implementation:
+
+```c
+int audio_node_pull(struct audio_node *node,
+                    struct audio_buffer_view *buf,
+                    size_t *out_size);
+```
+
+Every filter and every sink reads its upstream through `audio_node_pull()` and passes **itself** as `node`; no node invokes an upstream node's `process` op (directly or through `audio_node_process()`). The helper owns the three decisions that used to be repeated per node:
+
+- **No upstream is a wiring error.** §4.3 and §4.4 require a filter and a sink to have an upstream, so `node->upstream == NULL` returns `-ENOTSUP` — never a clean end of stream, which would silently swallow the track.
+- **`-EPIPE` never escapes upwards.** `-EPIPE` is the pipeline's reserved end-of-stream code (§9). A `-EPIPE` arriving from below is remapped to `-EIO`, so a broken upstream can never reach the application as a finished track.
+- **End of stream is forwarded verbatim.** `*out_size == 0` with return `0` travels up the chain unchanged; `*out_size` is `0` on every failure.
+
+Nodes keep control of **when** and **how often** they pull: a resampler may pull several times per frame and a mixer once per upstream (§13).
 
 ### 4.2 Source role
 
@@ -166,7 +189,7 @@ EOF convention:
 - `role == AUDIO_NODE_ROLE_FILTER`
 - `upstream != NULL`
 - `process()`:
-  - first calls `upstream->ops->process(...)`,
+  - first calls `audio_node_pull(node, buf, out_size)` (§4.1.1),
   - processes the delivered samples (in-place or using scratch),
   - writes the resulting sample count back to `*out_size`.
 
@@ -181,10 +204,11 @@ EOF behavior:
 - `role == AUDIO_NODE_ROLE_SINK`
 - `upstream != NULL`
 - `process()`:
-  - calls `upstream->ops->process(...)`,
+  - calls `audio_node_pull(node, buf, out_size)` (§4.1.1),
   - processes or consumes the data (e.g., writes to a file),
   - the pipeline mostly cares about EOF/errors:
     - If `*out_size == 0`: end-of-stream detected.
+    - A sink defined without an upstream is a wiring error: the pull reports `-ENOTSUP`.
 
 Note:
 - Unlike many frameworks, the sink does not have to write into `buf`; it uses it as a transient transport buffer.
@@ -463,6 +487,7 @@ Behavior:
 ### 9.2 Errors
 
 - Any negative return value from `open()`, `process()`, `close()` is an error.
+- `-EPIPE` is **reserved** for end of stream: `audio_pipeline_process_frame()` returns it when the sink reports `out_size == 0`, and the worker thread turns that into a clean EOF event. No node may report `-EPIPE` as a failure. `audio_node_pull()` (§4.1.1) enforces this on the upstream boundary; a node that talks to a filesystem remaps its own `-EPIPE` to `-EIO` the same way.
 - On the first error:
   - pipeline stops further frame processing (`playing = false`),
   - generates `AUDIO_PIPELINE_EVENT_ERROR`,

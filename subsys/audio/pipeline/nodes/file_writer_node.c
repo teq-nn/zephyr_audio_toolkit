@@ -33,6 +33,8 @@
 #include <zephyr/audio/audio_nodes.h>
 #include <zephyr/audio/audio_wav.h>
 
+#include "../audio_internal.h"
+
 LOG_MODULE_REGISTER(audio_file_writer, LOG_LEVEL_INF);
 
 /* v1 writes 16 bit PCM; the spec's 24 bit path is not built yet. */
@@ -48,23 +50,6 @@ LOG_MODULE_REGISTER(audio_file_writer, LOG_LEVEL_INF);
  */
 #define FILE_WRITER_DEFAULT_RATE_HZ 48000U
 #define FILE_WRITER_DEFAULT_CHANNELS 2U
-
-/*
- * The pipeline reserves -EPIPE for "end of stream": audio_pipeline_process_frame()
- * returns it when the sink reports out_size == 0, and the worker thread turns
- * that into a clean EOF event. A real failure must therefore never leave this
- * node as -EPIPE, or a broken file - or a broken upstream - would look like a
- * finished track.
- */
-static int file_writer_errno(int err)
-{
-	if (err == -EPIPE) {
-		LOG_WRN("remapping -EPIPE to -EIO");
-		return -EIO;
-	}
-
-	return err;
-}
 
 /*
  * Serialise a canonical RIFF/WAVE header declaring @p data_bytes of payload
@@ -99,7 +84,7 @@ static int file_writer_write_all(struct audio_file_writer_state *state, const vo
 
 	if (written < 0) {
 		LOG_ERR("%s: write of %zu bytes failed (%d)", state->path, len, (int)written);
-		return file_writer_errno((int)written);
+		return audio_eof_safe_errno((int)written);
 	}
 
 	if ((size_t)written != len) {
@@ -141,7 +126,7 @@ static int file_writer_finalize(struct audio_file_writer_state *state)
 	ret = fs_seek(&state->file, 0, FS_SEEK_SET);
 	if (ret < 0) {
 		LOG_ERR("%s: seek to the header failed (%d)", state->path, ret);
-		return file_writer_errno(ret);
+		return audio_eof_safe_errno(ret);
 	}
 
 	ret = file_writer_write_all(state, header, sizeof(header));
@@ -156,13 +141,13 @@ static int file_writer_finalize(struct audio_file_writer_state *state)
 	ret = fs_sync(&state->file);
 	if (ret < 0 && ret != -ENOTSUP) {
 		LOG_ERR("%s: sync failed (%d)", state->path, ret);
-		return file_writer_errno(ret);
+		return audio_eof_safe_errno(ret);
 	}
 
 	ret = fs_seek(&state->file, 0, FS_SEEK_END);
 	if (ret < 0) {
 		LOG_ERR("%s: seek back to the end failed (%d)", state->path, ret);
-		return file_writer_errno(ret);
+		return audio_eof_safe_errno(ret);
 	}
 
 	state->header_stale = false;
@@ -185,7 +170,7 @@ static int file_writer_release(struct audio_file_writer_state *state)
 
 		err = fs_close(&state->file);
 		if (ret == 0) {
-			ret = file_writer_errno(err);
+			ret = audio_eof_safe_errno(err);
 		}
 
 		state->file_open = false;
@@ -295,7 +280,7 @@ static int file_writer_open(struct audio_node *node)
 	ret = fs_open(&state->file, state->path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
 	if (ret < 0) {
 		LOG_ERR("%s: create failed (%d)", state->path, ret);
-		return file_writer_errno(ret);
+		return audio_eof_safe_errno(ret);
 	}
 
 	state->file_open = true;
@@ -334,7 +319,6 @@ static int file_writer_process(struct audio_node *node, struct audio_buffer_view
 	}
 
 	*out_size = 0;
-	buf->size = 0;
 
 	if (!state->file_open) {
 		/* process() before open(), or after close(). Reporting EOF here
@@ -344,14 +328,9 @@ static int file_writer_process(struct audio_node *node, struct audio_buffer_view
 		return -EBADF;
 	}
 
-	if (node->upstream) {
-		ret = audio_node_process(node->upstream, buf, &produced);
-		if (ret < 0) {
-			/* Passed through, but never as -EPIPE: an upstream error
-			 * must not reach the pipeline looking like end of data.
-			 */
-			return file_writer_errno(ret);
-		}
+	ret = audio_node_pull(node, buf, &produced);
+	if (ret < 0) {
+		return ret;
 	}
 
 	if (produced == 0U) {
@@ -402,7 +381,6 @@ static int file_writer_process(struct audio_node *node, struct audio_buffer_view
 	/* The sink consumed the frame; the pipeline only cares that it was not
 	 * empty (spec §4.4).
 	 */
-	buf->size = produced;
 	*out_size = produced;
 
 	return 0;

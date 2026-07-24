@@ -438,18 +438,19 @@ int audio_pipeline_process_frame(struct audio_pipeline *pipeline)
 
 	view.data = pipeline->frame_buf;
 	view.capacity = pipeline->frame_capacity;
-	view.size = 0;
 
 	ret = audio_node_process(pipeline->sink, &view, &produced);
 	if (ret < 0) {
-		return ret;
+		/* Only an empty frame ends the stream, never a failing sink:
+		 * -EPIPE is this function's own EOF signal, so a sink reporting
+		 * it would be read as a finished track (manifest §7).
+		 */
+		return audio_eof_safe_errno(ret);
 	}
 
 	if (produced == 0) {
 		return -EPIPE;
 	}
-
-	view.size = produced;
 
 	return 0;
 }

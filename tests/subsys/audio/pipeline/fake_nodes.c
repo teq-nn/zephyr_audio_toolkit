@@ -72,7 +72,6 @@ static int fake_source_process(struct audio_node *node, struct audio_buffer_view
 
 	if (state->fail_at_frame != 0U &&
 	    (size_t)atomic_get(&state->frames_done) + 1U == state->fail_at_frame) {
-		buf->size = 0;
 		*out_size = 0;
 		return state->process_ret;
 	}
@@ -80,7 +79,6 @@ static int fake_source_process(struct audio_node *node, struct audio_buffer_view
 	n = fake_source_available(state, buf->capacity);
 	if (n == 0U) {
 		/* End of stream: out_size == 0 with a successful return. */
-		buf->size = 0;
 		*out_size = 0;
 		return 0;
 	}
@@ -96,7 +94,6 @@ static int fake_source_process(struct audio_node *node, struct audio_buffer_view
 		}
 	}
 
-	buf->size = n;
 	*out_size = n;
 	atomic_inc(&state->frames_done);
 
@@ -158,13 +155,18 @@ static int fake_sink_process(struct audio_node *node, struct audio_buffer_view *
 		atomic_inc(&state->wrong_capacity);
 	}
 
-	if (node->upstream) {
-		ret = audio_node_process(node->upstream, buf, out_size);
-		if (ret < 0) {
-			return ret;
-		}
-	} else {
+	if (state->fail_at_frame != 0U &&
+	    (size_t)atomic_get(&state->frames_seen) + 1U == state->fail_at_frame) {
 		*out_size = 0;
+		return state->process_ret;
+	}
+
+	/* Through the one pull helper, exactly like a shipped node: a fake that
+	 * called the upstream op itself could pass a chain the real nodes reject.
+	 */
+	ret = audio_node_pull(node, buf, out_size);
+	if (ret < 0) {
+		return ret;
 	}
 
 	if (*out_size == 0U) {

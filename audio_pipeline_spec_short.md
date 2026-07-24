@@ -37,16 +37,34 @@ sink -> filter -> ... -> filter -> source
 All three implement the same "opc" op set (spec §4.1):
 
 ```c
+struct audio_buffer_view {
+    int32_t *data;     /* frame buffer, owned by the pipeline */
+    size_t   capacity; /* samples the buffer can hold */
+};
+
 struct audio_node_ops {
-    int     (*open)(struct audio_node *node);
-    ssize_t (*process)(struct audio_node *node, int32_t *buf,
-                       size_t capacity /* samples */, size_t *out_size /* samples */);
-    int     (*close)(struct audio_node *node);
+    int (*open)(struct audio_node *node);
+    int (*process)(struct audio_node *node, struct audio_buffer_view *buf,
+                   size_t *out_size /* samples */);
+    int (*close)(struct audio_node *node);
 };
 ```
 
-`open()`/`close()` return Zephyr error codes (`0` ok, `< 0` failure). `process()` returns the sample
-count produced (mirrored in `*out_size`) or a negative error code.
+All three return Zephyr error codes (`0` ok, `< 0` failure). `process()` reports the sample count it
+produced in `*out_size` — the only place a frame size is ever written — and `0` there means end of
+stream.
+
+Filters and sinks never call an upstream node's `process` op themselves; they read it through the one
+pull helper (spec §4.1.1):
+
+```c
+int audio_node_pull(struct audio_node *node, struct audio_buffer_view *buf, size_t *out_size);
+```
+
+It returns `-ENOTSUP` when the node has no upstream (a wiring error, not an empty track), forwards
+end of stream verbatim, and remaps a `-EPIPE` coming from below to `-EIO` so a broken upstream can
+never look like a finished one. Nodes still choose *when* and *how often* to pull, which is what
+keeps spec §13's resampler and mixer possible.
 
 ## 3. Threading (manifest §3, spec §3)
 
@@ -120,9 +138,10 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 - **EOF**: the source reports `*out_size = 0` and returns `0`. Filters propagate it unchanged. The
   sink detects it and tells the pipeline, which clears `playing` and emits
   `AUDIO_PIPELINE_EVENT_EOF`. Processing stops; **the thread keeps running** in idle mode.
-- **Error**: any negative return from `open()`, `process()`, or `close()`. On the first error the
-  pipeline stops frame processing, emits `AUDIO_PIPELINE_EVENT_ERROR` with the error code, and may
-  `close()` all nodes.
+- **Error**: any negative return from `open()`, `process()`, or `close()`. `-EPIPE` is reserved for
+  the pipeline's own end-of-stream signal, so no node may report it; the pull helper remaps it to
+  `-EIO`. On the first error the pipeline stops frame processing, emits
+  `AUDIO_PIPELINE_EVENT_ERROR` with the error code, and may `close()` all nodes.
 - Event types: `AUDIO_PIPELINE_EVENT_EOF`, `AUDIO_PIPELINE_EVENT_ERROR`,
   `AUDIO_PIPELINE_EVENT_RECONFIG`, delivered via an internal `k_msgq` (optionally via callback).
 

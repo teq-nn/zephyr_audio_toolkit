@@ -13,22 +13,12 @@ static int null_sink_open(struct audio_node *node)
 static int null_sink_process(struct audio_node *node, struct audio_buffer_view *buf,
 			     size_t *out_size)
 {
-	int ret;
-
 	if (!node || !buf || !out_size) {
 		return -EINVAL;
 	}
 
-	if (node->upstream) {
-		ret = audio_node_process(node->upstream, buf, out_size);
-		if (ret < 0) {
-			return ret;
-		}
-	} else {
-		*out_size = 0;
-	}
-
-	return 0;
+	/* The whole node: pull a frame and drop it (spec §4.1.1). */
+	return audio_node_pull(node, buf, out_size);
 }
 
 static int null_sink_close(struct audio_node *node)
