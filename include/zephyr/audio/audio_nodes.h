@@ -56,10 +56,46 @@ struct audio_file_reader_state {
 	bool file_open;
 };
 
+/**
+ * @brief Samples the file writer narrows per filesystem write.
+ *
+ * Only sizes the per-instance conversion scratch buffer; a frame larger than
+ * this is written in several chunks, so it does not cap the frame size.
+ */
+#define AUDIO_FILE_WRITER_CHUNK_SAMPLES 64U
+
 /** @brief Per-instance state of the file writer sink node. */
 struct audio_file_writer_state {
 	/** Destination file, owned by the definition macro. */
 	const char *path;
+	/**
+	 * Format the sink writes to disk. Optional: every zero field takes its
+	 * default in open() (48000 Hz, 2 channels, 16 bit), so an application
+	 * that is happy with the v1 defaults leaves the whole struct alone.
+	 *
+	 * The container field describes the *pipeline* side and is always
+	 * ::AUDIO_SAMPLE_FORMAT_S32_LE; @c valid_bits_per_sample is the on-disk
+	 * resolution and v1 supports 16 only (spec §5.2/§5.3). Set it before
+	 * open(); the node does not look at it again afterwards.
+	 */
+	struct audio_stream_config fmt;
+
+	/*
+	 * Everything below belongs to the node implementation. It is only
+	 * meaningful between a successful open() and the matching close(), and
+	 * an application must treat it as read-only.
+	 */
+
+	/** Handle of @ref path while the node is open. */
+	struct fs_file_t file;
+	/** Payload bytes appended to the @c data chunk so far. */
+	uint32_t data_bytes;
+	/** True while @ref file holds an open handle. */
+	bool file_open;
+	/** Set while the sizes on disk are older than @ref data_bytes. */
+	bool header_stale;
+	/** Scratch space for the S32 -> S16 conversion, never read by callers. */
+	uint8_t chunk[AUDIO_FILE_WRITER_CHUNK_SAMPLES * sizeof(int16_t)];
 };
 
 extern const struct audio_node_ops file_reader_node_ops;

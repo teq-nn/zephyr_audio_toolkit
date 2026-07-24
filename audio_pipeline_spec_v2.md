@@ -471,7 +471,28 @@ struct audio_file_reader_state {
   - converts to desired output format (e.g., 16-bit PCM),
   - writes to file.
 
-Implementation mirrors the reader, in reverse.
+Implementation mirrors the reader, in reverse. Two decisions are contract:
+
+- **Header sizes: placeholder, then patch.** `open()` writes a canonical 44-byte
+  header declaring an empty chunk (RIFF size 36, `data` size 0). The real sizes are
+  patched by seeking to 0, rewriting the header, `fs_sync()`, then seeking back to
+  end. This happens on **end of stream as well as in `close()`**, so the file is
+  already valid when the pipeline reports EOF — before `join()`. `data_size` counts
+  only bytes the filesystem confirmed, so it can never exceed the payload on disk.
+  An aborted run therefore leaves a structurally valid header declaring an empty
+  track: a reader sees immediate EOF, never a bogus length.
+- **`audio_file_writer_state.fmt` is the sink-side format seam.** The node has no
+  route to the pipeline config, so the output format lives on the per-instance
+  state. Zero fields take defaults in `open()` (48000 Hz, 2 channels, 16 bit) and
+  the resolved values are written back, so the effective format stays observable.
+
+Conversion is **truncation toward negative infinity** — keep the top 16 bits,
+`(uint16_t)((uint32_t)sample >> 16)`. No rounding bias and no clipping: a 32-bit
+value shifted down by 16 always lands in `[-32768, 32767]`, so clamping cannot be
+needed. Round-to-nearest is rejected deliberately — the `+0x8000` bias overflows
+`int32_t` just below `INT32_MAX` and pushes full scale out of the int16 range.
+Truncation is also the exact inverse of the reader's `s16 << 16`, which makes the
+roundtrip bit-identical.
 
 ---
 

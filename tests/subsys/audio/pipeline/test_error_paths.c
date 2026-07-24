@@ -1,8 +1,46 @@
-#include <errno.h>
+/*
+ * Two suites:
+ *
+ *  - audio_pipeline: the argument/state guards of the control API plus a
+ *    start/play/stop/join smoke test. These predate the file nodes and do not
+ *    touch the filesystem.
+ *  - audio_pipeline_negative: the negative test strategy of spec §12.3 driven
+ *    end to end through the worker thread - a corrupt header aborting start(),
+ *    a truncated file ending as a clean EOF, a simulated I/O error surfacing as
+ *    an ERROR event, and the two file-writer overflow guards (-EFBIG, -ENOSPC).
+ *
+ * Everything runs headless on native_sim, without audio hardware (spec §12.1).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
+#include <errno.h>
+#include <string.h>
+
+#include <zephyr/fs/fs.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/ztest.h>
 
+#include <zephyr/audio/audio_node.h>
+#include <zephyr/audio/audio_nodes.h>
 #include <zephyr/audio/audio_pipeline.h>
+#include <zephyr/audio/audio_pipeline_events.h>
+
+#include "wav_fixture.h"
+#include "wav_parser.h"
+
+/* =========================================================================
+ * Suite 1: audio_pipeline - control API guards and a lifecycle smoke test.
+ * ======================================================================
+ */
+
+static void test_event_handler(const struct audio_pipeline_event *event, void *user_data)
+{
+	ARG_UNUSED(event);
+	ARG_UNUSED(user_data);
+}
 
 ZTEST(audio_pipeline, test_invalid_config_rejected)
 {
@@ -30,3 +68,372 @@ ZTEST(audio_pipeline, test_lifecycle_rejects_uninitialised_pipeline)
 	zassert_equal(audio_pipeline_stop(&pipeline), -EINVAL, "stop before init accepted");
 	zassert_equal(audio_pipeline_join(&pipeline), -EINVAL, "join before init accepted");
 }
+
+ZTEST(audio_pipeline, test_pipeline_start_play_stop_join)
+{
+	struct audio_node sink = {
+		.role = AUDIO_NODE_ROLE_SINK,
+		.ops = &null_sink_node_ops,
+		.upstream = NULL,
+		.state = NULL,
+	};
+	struct audio_pipeline_config cfg = {
+		.stream = {
+			.sample_rate_hz = 44100U,
+			.channels = 2U,
+			.valid_bits_per_sample = 24U,
+			.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+		},
+		.frame_samples = CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES,
+		.event_cb = test_event_handler,
+		.event_user_data = NULL,
+	};
+	struct audio_pipeline pipeline = {0};
+
+	zassert_true(audio_pipeline_config_is_valid(&cfg), "config must be valid");
+	zassert_equal(audio_pipeline_init(&pipeline, &cfg, &sink), 0, "init failed");
+	zassert_equal(audio_pipeline_start(&pipeline), 0, "start failed");
+	zassert_true(audio_pipeline_is_running(&pipeline), "worker thread missing");
+
+	/* A sink without upstream reports EOF right away; the thread survives. */
+	zassert_equal(audio_pipeline_play(&pipeline), 0, "play failed");
+	k_msleep(20);
+	zassert_true(audio_pipeline_is_running(&pipeline), "EOF killed the worker thread");
+	zassert_false(audio_pipeline_is_playing(&pipeline), "still playing after EOF");
+
+	zassert_equal(audio_pipeline_stop(&pipeline), 0, "stop failed");
+	zassert_equal(audio_pipeline_join(&pipeline), 0, "join failed");
+	zassert_false(audio_pipeline_is_running(&pipeline), "worker thread still running");
+}
+
+ZTEST_SUITE(audio_pipeline, NULL, NULL, NULL, NULL, NULL);
+
+/* =========================================================================
+ * Suite 2: audio_pipeline_negative - spec §12.3 end to end.
+ * ======================================================================
+ */
+
+#define NEG_FRAME_SAMPLES 16
+
+static const struct audio_pipeline_config neg_config = {
+	.stream = {
+		.sample_rate_hz = 48000U,
+		.channels = 2U,
+		.valid_bits_per_sample = 16U,
+		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+	},
+	.frame_samples = NEG_FRAME_SAMPLES,
+	.event_cb = NULL,
+	.event_user_data = NULL,
+};
+
+/* -------------------------------------------------------------------------
+ * A source that hands out a few good frames and then fails, so a filesystem
+ * I/O error mid-stream can be simulated deterministically without depending on
+ * the timing of a real disk fault.
+ * ----------------------------------------------------------------------
+ */
+
+struct fault_source_state {
+	size_t good_frames; /* frames to deliver before failing */
+	size_t done;
+	int fail_ret; /* returned once good_frames have been delivered */
+};
+
+static int fault_source_open(struct audio_node *node)
+{
+	struct fault_source_state *state = node->state;
+
+	state->done = 0;
+
+	return 0;
+}
+
+static int fault_source_process(struct audio_node *node, struct audio_buffer_view *buf,
+				size_t *out_size)
+{
+	struct fault_source_state *state = node->state;
+
+	if (state->done >= state->good_frames) {
+		return state->fail_ret;
+	}
+
+	/* A whole stereo frame of silence - the values do not matter here. */
+	memset(buf->data, 0, buf->capacity * sizeof(int32_t));
+	buf->size = buf->capacity;
+	*out_size = buf->capacity;
+	state->done++;
+
+	return 0;
+}
+
+static int fault_source_close(struct audio_node *node)
+{
+	ARG_UNUSED(node);
+
+	return 0;
+}
+
+static const struct audio_node_ops fault_source_ops = {
+	.open = fault_source_open,
+	.process = fault_source_process,
+	.close = fault_source_close,
+};
+
+#define FAULT_SOURCE_DEFINE(_name)                                                          \
+	static struct fault_source_state _name##_state;                                     \
+	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &fault_source_ops, NULL,           \
+			  &_name##_state)
+
+/* A source that produces exactly one stereo frame, for the -EFBIG guard. */
+static int one_frame_open(struct audio_node *node)
+{
+	ARG_UNUSED(node);
+
+	return 0;
+}
+
+static int one_frame_process(struct audio_node *node, struct audio_buffer_view *buf,
+			     size_t *out_size)
+{
+	size_t n = MIN((size_t)2, buf->capacity);
+
+	ARG_UNUSED(node);
+
+	memset(buf->data, 0, n * sizeof(int32_t));
+	buf->size = n;
+	*out_size = n;
+
+	return 0;
+}
+
+static const struct audio_node_ops one_frame_ops = {
+	.open = one_frame_open,
+	.process = one_frame_process,
+	.close = fault_source_close,
+};
+
+#define ONE_FRAME_SOURCE_DEFINE(_name) \
+	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &one_frame_ops, NULL, NULL)
+
+/* Corrupt header -> reader open() fails -> ERROR. */
+AUDIO_FILE_READER_NODE_DEFINE(neg_bad_reader, AUDIO_TEST_PATH("neg_bad.wav"));
+AUDIO_FILE_WRITER_NODE_DEFINE(neg_bad_writer, &neg_bad_reader, AUDIO_TEST_PATH("neg_bad_out.wav"));
+AUDIO_PIPELINE_DEFINE(neg_bad_pipeline, NEG_FRAME_SAMPLES,
+		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
+
+/* Truncated file -> reader short read -> clean EOF, no ERROR. */
+AUDIO_FILE_READER_NODE_DEFINE(neg_trunc_reader, AUDIO_TEST_PATH("neg_trunc.wav"));
+AUDIO_FILE_WRITER_NODE_DEFINE(neg_trunc_writer, &neg_trunc_reader,
+			      AUDIO_TEST_PATH("neg_trunc_out.wav"));
+AUDIO_PIPELINE_DEFINE(neg_trunc_pipeline, NEG_FRAME_SAMPLES,
+		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
+
+/* Simulated I/O error mid-stream -> ERROR carrying the code. */
+FAULT_SOURCE_DEFINE(neg_fault_source);
+AUDIO_FILE_WRITER_NODE_DEFINE(neg_fault_writer, &neg_fault_source,
+			      AUDIO_TEST_PATH("neg_fault_out.wav"));
+AUDIO_PIPELINE_DEFINE(neg_fault_pipeline, NEG_FRAME_SAMPLES,
+		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
+
+/* -EFBIG guard: one frame past a data chunk that is already at the 32 bit ceiling. */
+ONE_FRAME_SOURCE_DEFINE(neg_efbig_source);
+AUDIO_FILE_WRITER_NODE_DEFINE(neg_efbig_writer, &neg_efbig_source,
+			      AUDIO_TEST_PATH("neg_efbig.wav"));
+
+static void negative_before(void *fixture)
+{
+	ARG_UNUSED(fixture);
+
+	zassert_equal(audio_test_fs_mount(), 0, "fixture filesystem did not mount");
+}
+
+/* -------------------------------------------------------------------------
+ * Corrupted WAV header -> open() fails and an ERROR event is observed.
+ * ----------------------------------------------------------------------
+ */
+
+ZTEST(audio_pipeline_negative, test_source_corrupt_header_emits_error_event)
+{
+	static const uint8_t garbage[64] = {'N', 'O', 'T', 'A', 'W', 'A', 'V', 'E'};
+	struct audio_pipeline_event event;
+	int ret;
+
+	zassert_equal(audio_test_write_raw(AUDIO_TEST_PATH("neg_bad.wav"), garbage, sizeof(garbage)),
+		      0, "could not write the corrupt fixture");
+
+	zassert_equal(audio_pipeline_init(&neg_bad_pipeline, &neg_config, &neg_bad_writer), 0,
+		      "init failed");
+
+	/* start() opens the chain sink-first, then upstream; the reader's open()
+	 * rejects the header, so start() fails and no worker thread is created.
+	 */
+	ret = audio_pipeline_start(&neg_bad_pipeline);
+	zassert_true(ret < 0, "start() must fail on a corrupt source header");
+	zassert_equal(ret, -EINVAL, "a corrupt header must surface as -EINVAL, got %d", ret);
+	zassert_false(audio_pipeline_is_running(&neg_bad_pipeline), "a thread was created anyway");
+
+	zassert_equal(audio_pipeline_get_event(&neg_bad_pipeline, &event, K_NO_WAIT), 0,
+		      "no ERROR event was published");
+	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_ERROR, "expected an ERROR event, got %d",
+		      (int)event.type);
+	zassert_equal(event.err, ret, "the event carries %d, start() returned %d", event.err, ret);
+	zassert_not_equal(event.err, -EPIPE, "an ERROR event must not carry the EOF code");
+}
+
+/* -------------------------------------------------------------------------
+ * Early EOF (truncated file) -> a clean EOF event, no ERROR.
+ * ----------------------------------------------------------------------
+ */
+
+ZTEST(audio_pipeline_negative, test_source_truncated_file_reports_clean_eof)
+{
+	/* The header promises 8 KiB of payload; the file carries eight samples.
+	 * The reader must treat the short read as end of stream, not an error.
+	 */
+	int16_t payload[8] = {1, -1, 2, -2, 3, -3, 4, -4};
+	struct audio_test_wav_spec spec = {
+		.declared_data_size = 8192U,
+		.payload = payload,
+		.payload_len = sizeof(payload),
+	};
+	struct audio_pipeline_event event;
+
+	zassert_equal(audio_test_write_wav(AUDIO_TEST_PATH("neg_trunc.wav"), &spec), 0,
+		      "could not write the truncated fixture");
+
+	zassert_equal(audio_pipeline_init(&neg_trunc_pipeline, &neg_config, &neg_trunc_writer), 0,
+		      "init failed");
+	zassert_equal(audio_pipeline_start(&neg_trunc_pipeline), 0, "start failed");
+	zassert_equal(audio_pipeline_play(&neg_trunc_pipeline), 0, "play failed");
+
+	zassert_equal(audio_pipeline_get_event(&neg_trunc_pipeline, &event, K_SECONDS(2)), 0,
+		      "no event within 2 s");
+	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_EOF,
+		      "a truncated file must end as a clean EOF, got type %d err %d",
+		      (int)event.type, event.err);
+	zassert_equal(event.err, 0, "the EOF event carries an error");
+
+	/* Nothing may follow the EOF - least of all an ERROR. */
+	zassert_equal(audio_pipeline_get_event(&neg_trunc_pipeline, &event, K_NO_WAIT), -ENOMSG,
+		      "an event followed the clean EOF");
+
+	zassert_equal(audio_pipeline_join(&neg_trunc_pipeline), 0, "join failed");
+
+	/* The eight samples that were there did make it through to the sink: read
+	 * the finalised output back and check its data chunk. close() has since
+	 * reset the writer's own counter, so the file on disk is the source of
+	 * truth here.
+	 */
+	{
+		static uint8_t trunc_buf[128];
+		struct wav_parser_result wav;
+		struct fs_file_t file;
+		ssize_t read;
+
+		fs_file_t_init(&file);
+		zassert_equal(fs_open(&file, AUDIO_TEST_PATH("neg_trunc_out.wav"), FS_O_READ), 0,
+			      "output could not be reopened");
+		read = fs_read(&file, trunc_buf, sizeof(trunc_buf));
+		zassert_true(read > 0, "output read back failed (%d)", (int)read);
+		zassert_equal(fs_close(&file), 0, "close after read back failed");
+
+		zassert_equal(wav_parser_read_header(trunc_buf, (size_t)read, &wav), 0,
+			      "the sink left an unparsable file");
+		zassert_equal(wav.data_size, sizeof(payload),
+			      "the writer stored %u bytes, expected %u", wav.data_size,
+			      (unsigned int)sizeof(payload));
+		zassert_equal((size_t)read, WAV_PARSER_MIN_HEADER_SIZE + sizeof(payload),
+			      "output file is the wrong length");
+	}
+}
+
+/* -------------------------------------------------------------------------
+ * Simulated I/O error during processing -> ERROR event carrying the code.
+ * ----------------------------------------------------------------------
+ */
+
+ZTEST(audio_pipeline_negative, test_processing_error_emits_error_event_with_code)
+{
+	struct audio_pipeline_event event;
+
+	/* One good frame, then a filesystem-style failure. -EIO is what both file
+	 * nodes remap a stray -EPIPE to, so it is the natural stand-in for a disk
+	 * that stops accepting data mid-stream (spec §12.3).
+	 */
+	neg_fault_source_state.good_frames = 1U;
+	neg_fault_source_state.fail_ret = -EIO;
+
+	zassert_equal(audio_pipeline_init(&neg_fault_pipeline, &neg_config, &neg_fault_writer), 0,
+		      "init failed");
+	zassert_equal(audio_pipeline_start(&neg_fault_pipeline), 0, "start failed");
+	zassert_equal(audio_pipeline_play(&neg_fault_pipeline), 0, "play failed");
+
+	zassert_equal(audio_pipeline_get_event(&neg_fault_pipeline, &event, K_SECONDS(2)), 0,
+		      "no event within 2 s");
+	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_ERROR,
+		      "a mid-stream failure must raise an ERROR, got type %d", (int)event.type);
+	zassert_equal(event.err, -EIO, "the ERROR event must carry the failing code, got %d",
+		      event.err);
+	zassert_not_equal(event.err, -EPIPE, "an ERROR event must not carry the EOF code");
+	zassert_false(audio_pipeline_is_playing(&neg_fault_pipeline), "still playing after an error");
+
+	zassert_equal(audio_pipeline_join(&neg_fault_pipeline), 0, "join failed");
+}
+
+/* -------------------------------------------------------------------------
+ * Writer -EFBIG guard: a data chunk that would exceed the 32 bit size field.
+ *
+ * White-box: writing four more gigabytes is not possible on a RAM disk, so the
+ * accumulated byte count is pushed to the ceiling by hand and a single frame is
+ * then enough to trip the guard. It exercises exactly the branch in
+ * file_writer_process() that no organic run can reach.
+ * ----------------------------------------------------------------------
+ */
+
+ZTEST(audio_pipeline_negative, test_sink_rejects_data_chunk_overflow)
+{
+	int32_t buf[NEG_FRAME_SAMPLES];
+	struct audio_buffer_view view = {
+		.data = buf,
+		.capacity = ARRAY_SIZE(buf),
+		.size = 0,
+	};
+	struct audio_file_writer_state *state = neg_efbig_writer.state;
+	size_t produced = 1;
+	int ret;
+
+	zassert_equal(audio_node_open(&neg_efbig_writer), 0, "open failed");
+
+	/* Two bytes of headroom below the 32 bit ceiling: the RIFF overhead is 36
+	 * bytes, so the guard fires when data_bytes + frame_bytes would pass
+	 * UINT32_MAX - 36. One stereo frame is four bytes, comfortably over two.
+	 */
+	state->data_bytes = UINT32_MAX - 36U - 2U;
+
+	ret = audio_node_process(&neg_efbig_writer, &view, &produced);
+	zassert_equal(ret, -EFBIG, "a data chunk past the 32 bit field must be rejected, got %d",
+		      ret);
+	zassert_not_equal(ret, -EPIPE, "a sink must never return -EPIPE; that means EOF");
+	zassert_equal(produced, 0U, "a failing process() must not claim samples");
+	zassert_equal(state->data_bytes, UINT32_MAX - 36U - 2U,
+		      "the rejected frame must not have been counted");
+
+	/* Reset before close() so finalisation does not try to stamp a bogus
+	 * multi-gigabyte size into the header.
+	 */
+	state->data_bytes = 0;
+	zassert_equal(audio_node_close(&neg_efbig_writer), 0, "close failed");
+}
+
+/*
+ * The writer's -ENOSPC short-write branch is intentionally not exercised here.
+ * The only way to reach it is a genuinely full filesystem, and filling the ext2
+ * RAM disk faults Zephyr's ext2 driver: a native_sim run that fills the disk and
+ * then writes crashes with SIGSEGV (twister rc=-11) inside the filesystem layer,
+ * not in this subsystem. There is no white-box seam to force a short fs_write()
+ * the way the -EFBIG guard can be forced through data_bytes. See the ticket
+ * report: -ENOSPC remains unverified for that reason.
+ */
+
+ZTEST_SUITE(audio_pipeline_negative, NULL, NULL, negative_before, NULL, NULL);

@@ -187,7 +187,8 @@ zephyr-audio-pipeline/
    │  ├─ test_lifecycle.c        # spec §8.2/§9 lifecycle
    │  ├─ test_static_define.c    # DEFINE macros, multi-instance isolation
    │  ├─ test_events.c           # k_msgq event queue
-   │  └─ test_file_reader.c      # WAV source, S16→S32 widening
+   │  ├─ test_file_reader.c      # WAV source, S16→S32 widening
+   │  └─ test_file_writer.c      # WAV sink, S32→S16 truncation
    └─ wav_parser/                # standalone unit test, no CONFIG_AUDIO_PIPELINE
       ├─ CMakeLists.txt
       ├─ prj.conf
