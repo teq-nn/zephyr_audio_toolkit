@@ -1,0 +1,5 @@
+state,current_ma,duty_cycle_percent
+active_tx,22.0,5
+active_cpu,8.5,15
+idle,1.2,30
+deep_sleep,0.04,50
