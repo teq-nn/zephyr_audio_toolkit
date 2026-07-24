@@ -84,8 +84,15 @@ struct audio_format {
   per-cycle workload. One `process()` call per node per frame.
 - The pipeline owns one static shared frame buffer; nodes may hold their own static scratch buffers.
 - `AUDIO_PIPELINE_DEFINE()` instantiates the pipeline struct, its thread stack
-  (`K_THREAD_STACK_DEFINE`), and the frame buffer. `*_NODE_DEFINE()` macros do the same for nodes and
-  their contexts. Users never supply buffer pointers.
+  (`K_THREAD_STACK_DEFINE`), the frame buffer, and the event slots — all per instance, so two
+  macro-defined pipelines share nothing. `*_NODE_DEFINE()` macros do the same for nodes and their
+  contexts. Users never supply buffer pointers.
+- A zero-initialised (hand-rolled) instance instead falls back on the subsystem's single built-in
+  stack, frame buffer and event slots. Those are **owned, not shared**: `init()` claims them and
+  gives a second claimant `-EBUSY`, `join()` releases them, `start()` reclaims them (also `-EBUSY`
+  if they were taken meanwhile). Need two pipelines at once? Use `AUDIO_PIPELINE_DEFINE()` for at
+  least one of them. Join such an instance before discarding it — that is the only release — and do
+  not pull frames or read events on it between the join and the next successful init/start.
 
 ## 6. Lifecycle and API (spec §8)
 
@@ -134,7 +141,8 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 - Roundtrip: mount a golden-master WAV, run `file_reader → [filter] → file_writer` to EOF, compare
   the output byte-for-byte.
 - Negative paths: corrupted WAV header makes `open()` fail; early EOF still yields a clean EOF event;
-  simulated I/O errors yield an ERROR event.
+  simulated I/O errors yield an ERROR event; a second hand-rolled pipeline asking for the built-in
+  resources gets `-EBUSY` while the first one keeps running.
 
 ## 10. Layout (manifest §12, spec §14)
 

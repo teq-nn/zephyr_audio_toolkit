@@ -18,20 +18,14 @@
 
 LOG_MODULE_DECLARE(audio_pipeline_core, LOG_LEVEL_INF);
 
-/* Built-in event slots for the single-instance case, the counterpart of the
- * built-in stack and frame buffer in audio_pipeline_core.c. A pipeline that
- * brings its own slots (AUDIO_PIPELINE_DEFINE) never touches these.
- */
-static struct audio_pipeline_event default_event_slots[AUDIO_PIPELINE_EVENT_QUEUE_DEPTH];
-
 void audio_pipeline_event_queue_init(struct audio_pipeline *pipeline)
 {
-	if (pipeline->event_slots == NULL) {
-		pipeline->event_slots = default_event_slots;
-		pipeline->event_slot_count = ARRAY_SIZE(default_event_slots);
-	}
-
-	/* Also purges whatever a previous life of this instance left behind. */
+	/* The slots are the instance's own (AUDIO_PIPELINE_DEFINE) or the
+	 * built-in ones audio_pipeline_init() claimed on its behalf; either way
+	 * they are installed by the time this runs.
+	 *
+	 * Also purges whatever a previous life of this instance left behind.
+	 */
 	k_msgq_init(&pipeline->event_msgq, (char *)pipeline->event_slots,
 		    sizeof(struct audio_pipeline_event), (uint32_t)pipeline->event_slot_count);
 }

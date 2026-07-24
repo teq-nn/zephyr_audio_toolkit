@@ -75,6 +75,14 @@ It acts as the binding engineering contract for ongoing development.
 - All pipeline and node structures are **static**, created via macros.
 - The pipeline thread uses a **shared frame buffer**, also static.
 - Nodes may have **internal scratch buffers**, also static (via DEFINE macros).
+- `AUDIO_PIPELINE_DEFINE()` allocates the stack, the frame buffer and the event slots **per
+  instance**, so macro-defined pipelines never share storage.
+- A hand-rolled (zero-initialised) instance instead falls back on the subsystem's **built-in**
+  stack, frame buffer and event slots. There is exactly one of each, and they are **owned, not
+  shared**: `audio_pipeline_init()` claims each built-in the instance leaves NULL and refuses a
+  second claimant with `-EBUSY`; `audio_pipeline_join()` releases them again, so sequential reuse
+  works and `audio_pipeline_start()` reclaims what a join gave back. Concurrency on the built-ins is
+  therefore an error the caller sees, not silent memory corruption.
 
 ---
 
@@ -95,6 +103,10 @@ It acts as the binding engineering contract for ongoing development.
   - `AUDIO_PIPELINE_EVENT_RECONFIG`
 - Events are exposed via a per-pipeline `k_msgq`, read with `audio_pipeline_get_event()`.
   The queue is the primary path; the optional `event_cb` callback is a secondary one.
+- The slot storage behind that queue is per instance for `AUDIO_PIPELINE_DEFINE()` and the
+  subsystem's single built-in set for a zero-initialised instance. The built-in set follows the
+  claim/release rule of §6, so two instances can never publish into one ring: the second one is
+  refused at `init()`/`start()` rather than interleaving its events with the first one's.
 - Resolved delivery contract: the callback is invoked **before** the event is queued, so an
   event becoming visible on the queue means the pipeline has finished reacting to it — chain
   quiesced and callback returned. Depth is `CONFIG_AUDIO_PIPELINE_EVENT_QUEUE_DEPTH`; on
@@ -185,11 +197,12 @@ zephyr-audio-pipeline/
    │  ├─ testcase.yaml
    │  ├─ test_roundtrip.c
    │  ├─ test_error_paths.c
-   │  ├─ test_lifecycle.c        # spec §8.2/§9 lifecycle
-   │  ├─ test_static_define.c    # DEFINE macros, multi-instance isolation
-   │  ├─ test_events.c           # k_msgq event queue
-   │  ├─ test_file_reader.c      # WAV source, S16→S32 widening
-   │  └─ test_file_writer.c      # WAV sink, S32→S16 truncation
+   │  ├─ test_lifecycle.c            # spec §8.2/§9 lifecycle
+   │  ├─ test_builtin_resources.c    # built-in stack, frame buffer, event slots: claim/release
+   │  ├─ test_static_define.c        # DEFINE macros, multi-instance isolation
+   │  ├─ test_events.c               # k_msgq event queue
+   │  ├─ test_file_reader.c          # WAV source, S16→S32 widening
+   │  └─ test_file_writer.c          # WAV sink, S32→S16 truncation
    └─ wav/                       # standalone unit test, no CONFIG_AUDIO_PIPELINE
       ├─ CMakeLists.txt
       ├─ prj.conf

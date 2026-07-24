@@ -171,6 +171,12 @@ static void static_define_after(void *fixture)
 	k_sem_give(&probe_b_filled);
 	(void)audio_pipeline_join(&pipeline_a);
 	(void)audio_pipeline_join(&pipeline_b);
+
+	/* The hand-rolled instance holds the subsystem's built-in stack, frame
+	 * buffer and event slots once a test has initialised it; join() is what
+	 * hands them back to the next hand-rolled pipeline.
+	 */
+	(void)audio_pipeline_join(&builtin_pipeline);
 }
 
 ZTEST(audio_pipeline_static_define, test_pipeline_define_allocates_per_instance_resources)

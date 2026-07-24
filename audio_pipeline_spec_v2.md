@@ -272,6 +272,42 @@ struct audio_pipeline {
 };
 ```
 
+#### Built-in resources and their ownership
+
+`stack`, `frame_buf` and `event_slots` are the caller's seam. Left NULL they select the
+subsystem's built-in objects — one thread stack, one frame buffer, one set of event slots, all
+file-scope statics in the core.
+
+Because there is only one of each, they are **claimed**, not shared:
+
+- `audio_pipeline_init()` claims every built-in the instance leaves NULL and installs it. If
+  another instance already holds one of them, init fails with `-EBUSY` and writes nothing: a fresh
+  instance stays zeroed and not `initialized`, and an instance that was joined out of its built-ins
+  keeps its previous configuration and pointers instead of being rebound.
+- Ownership is tracked per resource, so an instance that brings its own stack but no frame buffer
+  contends only for the frame buffer.
+- Re-initialising an instance that already owns a built-in succeeds — rebinding a pipeline to a new
+  configuration or sink must not lock it out of its own storage.
+- `audio_pipeline_join()` releases whatever the instance holds, which is what makes
+  init → join → init hand the built-ins on to the next instance.
+- `audio_pipeline_start()` claims again, because a joined instance still points at resources it has
+  given back. It returns `-EBUSY` if they were taken in the meantime, and publishes **no** ERROR
+  event in that case — the event queue is one of the resources it no longer owns.
+
+Two pipelines that must run concurrently therefore need `AUDIO_PIPELINE_DEFINE()` (or caller-owned
+storage) for at least one of them; that path allocates per instance and never touches the built-ins.
+
+Two obligations fall on the caller, because the guard covers the entry points that *take* the
+resources, not every use of them:
+
+- An instance running on the built-ins must be joined before it is discarded. `join()` is the only
+  release; there is no deinit, and an instance that is initialised and then abandoned holds them
+  for the lifetime of the process.
+- Between a `join()` and the next successful `init()`/`start()` the instance still points at the
+  built-ins but owns none of them. `audio_pipeline_process_frame()` and
+  `audio_pipeline_get_event()` must not be called in that window — they would read and write the
+  new owner's frame buffer and event ring.
+
 ### 6.2 Static definition
 
 The pipeline is defined statically via a macro, e.g.:
@@ -345,8 +381,10 @@ Agreements:
 
 - `audio_pipeline_init()`:
   - sets internal flags,
+  - claims and installs the built-in stack, frame buffer and event slots for every resource field
+    the instance left NULL (§6.1), returning `-EBUSY` when another instance holds one of them,
   - initializes the event queue,
-  - may be called only once per pipeline instance.
+  - may be called again on the same instance to rebind it (that is not a second claim).
 - `audio_pipeline_set_nodes()`:
   - assigns `source`, filter list, and `sink`,
   - internally links `upstream` pointers (Filter[i].upstream = (i==0 ? source : Filter[i-1]); sink.upstream = last filter or source).
@@ -366,6 +404,8 @@ int audio_pipeline_join(struct audio_pipeline *pl); /* optional: wait for thread
 Recommended behavior:
 
 - `audio_pipeline_start()`:
+  - reclaims the built-in resources the instance runs on (§6.1), failing with `-EBUSY` and without
+    an ERROR event if another instance took them after a join,
   - creates the thread (if not already existing),
   - opens all nodes via `node->ops->open`.
 - `audio_pipeline_play()`:
@@ -375,7 +415,9 @@ Recommended behavior:
   - sets `pl->playing = false`,
   - thread stays alive but idles/waits.
 - `audio_pipeline_join()`:
-  - optional: ends thread (cleanup scenarios).
+  - optional: ends thread (cleanup scenarios),
+  - releases any built-in resource the instance holds (§6.1), after the closing errors have been
+    published, so the next hand-rolled pipeline can claim it.
 
 ### 8.3 Events
 
@@ -578,6 +620,10 @@ Test steps:
 - Corrupted WAV header → `open()` must fail.
 - Early EOF → pipeline must emit a clean EOF event.
 - Simulated I/O errors → ERROR event.
+- A second hand-rolled pipeline claiming the built-in resources (§6.1) → `-EBUSY` from `init()`,
+  the first claimant unaffected, and the built-ins reusable after its `join()`. The two instances
+  must be distinguishable (different frame sizes, sample patterns and frame counts), otherwise the
+  test would still pass if the guard were removed.
 
 ---
 

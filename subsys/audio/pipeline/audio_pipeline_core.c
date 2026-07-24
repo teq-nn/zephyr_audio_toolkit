@@ -18,10 +18,128 @@
 LOG_MODULE_REGISTER(audio_pipeline_core, LOG_LEVEL_INF);
 
 /* Built-in resources for the single-instance case. A pipeline that brings its
- * own stack and frame buffer (AUDIO_PIPELINE_DEFINE) never touches these.
+ * own stack, frame buffer and event slots (AUDIO_PIPELINE_DEFINE) never touches
+ * these.
  */
 static K_THREAD_STACK_DEFINE(default_pipeline_stack, AUDIO_PIPELINE_STACK_SIZE);
 static int32_t default_frame_buf[AUDIO_PIPELINE_MAX_FRAME_SAMPLES];
+static struct audio_pipeline_event default_event_slots[AUDIO_PIPELINE_EVENT_QUEUE_DEPTH];
+
+/* There is one of each, so at most one instance may hold them. Ownership is
+ * tracked per resource - a pipeline that brings only its own stack still
+ * contends for the frame buffer - and NULL means "free". Without this a second
+ * zero-initialised pipeline would silently run on the first one's memory.
+ *
+ * An owner is only ever compared, never dereferenced, so an instance discarded
+ * without audio_pipeline_join() leaves a stale identity rather than a dangling
+ * read - but it also never gives its built-ins back. Joining before discarding
+ * is part of the contract (see audio_pipeline.h).
+ */
+static struct audio_pipeline *default_stack_owner;
+static struct audio_pipeline *default_frame_buf_owner;
+static struct audio_pipeline *default_event_slots_owner;
+static struct k_spinlock default_owner_lock;
+
+/* True while @p owner is free or already @p pipeline's: re-claiming what an
+ * instance holds has to succeed, otherwise start() could not follow init().
+ */
+static bool claimable_by(const struct audio_pipeline *owner,
+			 const struct audio_pipeline *pipeline)
+{
+	return owner == NULL || owner == pipeline;
+}
+
+/*
+ * Claim every built-in @p pipeline runs on - the ones it has no storage of its
+ * own for, plus the ones an earlier claim already installed - and install the
+ * missing ones.
+ *
+ * All three are checked before any of them is committed, so a refusal leaves
+ * both the caller's instance and the current owner untouched.
+ *
+ * @retval 0 on success, also when the pipeline brings all of its own storage
+ * @retval -EBUSY if another instance holds one of the built-ins
+ */
+static int pipeline_claim_defaults(struct audio_pipeline *pipeline)
+{
+	bool wants_stack = pipeline->stack == NULL || pipeline->stack == default_pipeline_stack;
+	bool wants_frame_buf =
+		pipeline->frame_buf == NULL || pipeline->frame_buf == default_frame_buf;
+	bool wants_event_slots =
+		pipeline->event_slots == NULL || pipeline->event_slots == default_event_slots;
+	k_spinlock_key_t key = k_spin_lock(&default_owner_lock);
+
+	if ((wants_stack && !claimable_by(default_stack_owner, pipeline)) ||
+	    (wants_frame_buf && !claimable_by(default_frame_buf_owner, pipeline)) ||
+	    (wants_event_slots && !claimable_by(default_event_slots_owner, pipeline))) {
+		k_spin_unlock(&default_owner_lock, key);
+		LOG_ERR("a built-in pipeline resource is already owned by another instance; "
+			"define the second pipeline with AUDIO_PIPELINE_DEFINE()");
+		return -EBUSY;
+	}
+
+	if (wants_stack) {
+		default_stack_owner = pipeline;
+	}
+
+	if (wants_frame_buf) {
+		default_frame_buf_owner = pipeline;
+	}
+
+	if (wants_event_slots) {
+		default_event_slots_owner = pipeline;
+	}
+
+	k_spin_unlock(&default_owner_lock, key);
+
+	/* Only ever installed into an empty field: a re-claim must not undo the
+	 * frame capacity clamp init() applied on top of it.
+	 *
+	 * Thread resources come as a unit: either the caller supplied a stack
+	 * (and owns size and priority with it) or the subsystem defaults apply.
+	 */
+	if (pipeline->stack == NULL) {
+		pipeline->stack = default_pipeline_stack;
+		pipeline->stack_size = K_THREAD_STACK_SIZEOF(default_pipeline_stack);
+		pipeline->priority = AUDIO_PIPELINE_PRIORITY;
+	}
+
+	if (pipeline->frame_buf == NULL) {
+		pipeline->frame_buf = default_frame_buf;
+		pipeline->frame_capacity = ARRAY_SIZE(default_frame_buf);
+	}
+
+	if (pipeline->event_slots == NULL) {
+		pipeline->event_slots = default_event_slots;
+		pipeline->event_slot_count = ARRAY_SIZE(default_event_slots);
+	}
+
+	return 0;
+}
+
+/*
+ * Give back whichever built-ins @p pipeline holds, so the next hand-rolled
+ * instance can have them. The instance keeps pointing at them - a joined
+ * pipeline is restartable - which is why audio_pipeline_start() claims again.
+ */
+static void pipeline_release_defaults(struct audio_pipeline *pipeline)
+{
+	k_spinlock_key_t key = k_spin_lock(&default_owner_lock);
+
+	if (default_stack_owner == pipeline) {
+		default_stack_owner = NULL;
+	}
+
+	if (default_frame_buf_owner == pipeline) {
+		default_frame_buf_owner = NULL;
+	}
+
+	if (default_event_slots_owner == pipeline) {
+		default_event_slots_owner = NULL;
+	}
+
+	k_spin_unlock(&default_owner_lock, key);
+}
 
 /*
  * Close the chain from @p first up to (excluding) @p end, walking upstream.
@@ -149,6 +267,8 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
 			const struct audio_pipeline_config *config,
 			struct audio_node *sink)
 {
+	int ret;
+
 	if (!pipeline || !config || !sink) {
 		return -EINVAL;
 	}
@@ -161,29 +281,20 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
 		return -EBUSY;
 	}
 
+	/* Before the first write to the instance, so a pipeline refused the
+	 * built-ins is handed back untouched rather than half bound.
+	 */
+	ret = pipeline_claim_defaults(pipeline);
+	if (ret < 0) {
+		return ret;
+	}
+
 	pipeline->config = config;
 	pipeline->sink = sink;
-
-	/* Thread resources come as a unit: either the caller supplied a stack
-	 * (and owns size and priority with it) or the subsystem defaults apply.
-	 */
-	if (pipeline->stack == NULL) {
-		pipeline->stack = default_pipeline_stack;
-		pipeline->stack_size = K_THREAD_STACK_SIZEOF(default_pipeline_stack);
-		pipeline->priority = AUDIO_PIPELINE_PRIORITY;
-	}
-
-	if (pipeline->frame_buf == NULL) {
-		pipeline->frame_buf = default_frame_buf;
-		pipeline->frame_capacity = ARRAY_SIZE(default_frame_buf);
-	}
 
 	/* The configured frame size governs how much of the buffer is used. */
 	pipeline->frame_capacity = MIN(pipeline->frame_capacity, (size_t)config->frame_samples);
 
-	/* Same pattern as the stack and the frame buffer: the caller's slots if
-	 * it brought any (AUDIO_PIPELINE_DEFINE), the built-in ones otherwise.
-	 */
 	audio_pipeline_event_queue_init(pipeline);
 
 	pipeline->nodes_open = false;
@@ -203,6 +314,16 @@ int audio_pipeline_start(struct audio_pipeline *pipeline)
 
 	if (!pipeline || !pipeline->initialized || !pipeline->sink) {
 		return -EINVAL;
+	}
+
+	/* An instance that was joined gave its built-ins back, so take them again
+	 * before touching them. Deliberately no ERROR event on the refusal: the
+	 * event queue is one of the resources this pipeline no longer owns, and
+	 * publishing into it would corrupt the new owner's queue.
+	 */
+	ret = pipeline_claim_defaults(pipeline);
+	if (ret < 0) {
+		return ret;
 	}
 
 	if (!pipeline->nodes_open) {
@@ -282,6 +403,11 @@ int audio_pipeline_join(struct audio_pipeline *pipeline)
 	if (ret < 0) {
 		audio_pipeline_publish_event(pipeline, AUDIO_PIPELINE_EVENT_ERROR, ret);
 	}
+
+	/* Last, so the close error still reaches the event queue the instance was
+	 * running on. From here the built-ins are up for grabs again.
+	 */
+	pipeline_release_defaults(pipeline);
 
 	return ret;
 }

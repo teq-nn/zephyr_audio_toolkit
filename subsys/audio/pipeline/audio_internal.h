@@ -21,7 +21,10 @@
 void audio_pipeline_publish_event(struct audio_pipeline *pipeline,
 				  enum audio_pipeline_event_type type, int err);
 
-/* Bind the instance's (or the built-in) event slots to its k_msgq. */
+/* Bind the instance's event slots to its k_msgq. The slots must already be
+ * installed - audio_pipeline_init() claims the built-in ones for an instance
+ * that brought none of its own before it calls this.
+ */
 void audio_pipeline_event_queue_init(struct audio_pipeline *pipeline);
 
 #endif /* ZEPHYR_AUDIO_INTERNAL_H_ */

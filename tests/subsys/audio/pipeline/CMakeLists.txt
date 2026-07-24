@@ -10,6 +10,7 @@ project(audio_pipeline_tests)
 # symbol a second definition at link time.
 target_sources(app PRIVATE
 	test_lifecycle.c
+	test_builtin_resources.c
 	test_roundtrip.c
 	test_error_paths.c
 	test_static_define.c
