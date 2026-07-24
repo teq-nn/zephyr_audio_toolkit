@@ -15,9 +15,7 @@
  */
 
 #include <errno.h>
-#include <string.h>
 
-#include <zephyr/fs/fs.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
@@ -28,6 +26,7 @@
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
 
+#include "fake_nodes.h"
 #include "wav_fixture.h"
 #include "wav_parser.h"
 
@@ -127,95 +126,6 @@ static const struct audio_pipeline_config neg_config = {
 	.event_user_data = NULL,
 };
 
-/* -------------------------------------------------------------------------
- * A source that hands out a few good frames and then fails, so a filesystem
- * I/O error mid-stream can be simulated deterministically without depending on
- * the timing of a real disk fault.
- * ----------------------------------------------------------------------
- */
-
-struct fault_source_state {
-	size_t good_frames; /* frames to deliver before failing */
-	size_t done;
-	int fail_ret; /* returned once good_frames have been delivered */
-};
-
-static int fault_source_open(struct audio_node *node)
-{
-	struct fault_source_state *state = node->state;
-
-	state->done = 0;
-
-	return 0;
-}
-
-static int fault_source_process(struct audio_node *node, struct audio_buffer_view *buf,
-				size_t *out_size)
-{
-	struct fault_source_state *state = node->state;
-
-	if (state->done >= state->good_frames) {
-		return state->fail_ret;
-	}
-
-	/* A whole stereo frame of silence - the values do not matter here. */
-	memset(buf->data, 0, buf->capacity * sizeof(int32_t));
-	buf->size = buf->capacity;
-	*out_size = buf->capacity;
-	state->done++;
-
-	return 0;
-}
-
-static int fault_source_close(struct audio_node *node)
-{
-	ARG_UNUSED(node);
-
-	return 0;
-}
-
-static const struct audio_node_ops fault_source_ops = {
-	.open = fault_source_open,
-	.process = fault_source_process,
-	.close = fault_source_close,
-};
-
-#define FAULT_SOURCE_DEFINE(_name)                                                          \
-	static struct fault_source_state _name##_state;                                     \
-	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &fault_source_ops, NULL,           \
-			  &_name##_state)
-
-/* A source that produces exactly one stereo frame, for the -EFBIG guard. */
-static int one_frame_open(struct audio_node *node)
-{
-	ARG_UNUSED(node);
-
-	return 0;
-}
-
-static int one_frame_process(struct audio_node *node, struct audio_buffer_view *buf,
-			     size_t *out_size)
-{
-	size_t n = MIN((size_t)2, buf->capacity);
-
-	ARG_UNUSED(node);
-
-	memset(buf->data, 0, n * sizeof(int32_t));
-	buf->size = n;
-	*out_size = n;
-
-	return 0;
-}
-
-static const struct audio_node_ops one_frame_ops = {
-	.open = one_frame_open,
-	.process = one_frame_process,
-	.close = fault_source_close,
-};
-
-#define ONE_FRAME_SOURCE_DEFINE(_name) \
-	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &one_frame_ops, NULL, NULL)
-
 /* Corrupt header -> reader open() fails -> ERROR. */
 AUDIO_FILE_READER_NODE_DEFINE(neg_bad_reader, AUDIO_TEST_PATH("neg_bad.wav"));
 AUDIO_FILE_WRITER_NODE_DEFINE(neg_bad_writer, &neg_bad_reader, AUDIO_TEST_PATH("neg_bad_out.wav"));
@@ -229,15 +139,21 @@ AUDIO_FILE_WRITER_NODE_DEFINE(neg_trunc_writer, &neg_trunc_reader,
 AUDIO_PIPELINE_DEFINE(neg_trunc_pipeline, NEG_FRAME_SAMPLES,
 		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
 
-/* Simulated I/O error mid-stream -> ERROR carrying the code. */
-FAULT_SOURCE_DEFINE(neg_fault_source);
+/* Simulated I/O error mid-stream -> ERROR carrying the code. The shared fake
+ * source delivers a few good frames and then fails, so the fault lands at a
+ * fixed frame instead of depending on the timing of a real disk error.
+ */
+AUDIO_FAKE_SOURCE_DEFINE(neg_fault_source);
 AUDIO_FILE_WRITER_NODE_DEFINE(neg_fault_writer, &neg_fault_source,
 			      AUDIO_TEST_PATH("neg_fault_out.wav"));
 AUDIO_PIPELINE_DEFINE(neg_fault_pipeline, NEG_FRAME_SAMPLES,
 		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
 
-/* -EFBIG guard: one frame past a data chunk that is already at the 32 bit ceiling. */
-ONE_FRAME_SOURCE_DEFINE(neg_efbig_source);
+/* -EFBIG guard: one frame past a data chunk that is already at the 32 bit
+ * ceiling. The source is scripted to hand out one stereo frame per call and
+ * never to end, so the guard - not the end of the stream - is what stops it.
+ */
+AUDIO_FAKE_SOURCE_DEFINE(neg_efbig_source);
 AUDIO_FILE_WRITER_NODE_DEFINE(neg_efbig_writer, &neg_efbig_source,
 			      AUDIO_TEST_PATH("neg_efbig.wav"));
 
@@ -328,22 +244,17 @@ ZTEST(audio_pipeline_negative, test_source_truncated_file_reports_clean_eof)
 	{
 		static uint8_t trunc_buf[128];
 		struct wav_parser_result wav;
-		struct fs_file_t file;
-		ssize_t read;
+		size_t read;
 
-		fs_file_t_init(&file);
-		zassert_equal(fs_open(&file, AUDIO_TEST_PATH("neg_trunc_out.wav"), FS_O_READ), 0,
-			      "output could not be reopened");
-		read = fs_read(&file, trunc_buf, sizeof(trunc_buf));
-		zassert_true(read > 0, "output read back failed (%d)", (int)read);
-		zassert_equal(fs_close(&file), 0, "close after read back failed");
+		read = audio_test_read_file(AUDIO_TEST_PATH("neg_trunc_out.wav"), trunc_buf,
+					    sizeof(trunc_buf));
 
-		zassert_equal(wav_parser_read_header(trunc_buf, (size_t)read, &wav), 0,
+		zassert_equal(wav_parser_read_header(trunc_buf, read, &wav), 0,
 			      "the sink left an unparsable file");
 		zassert_equal(wav.data_size, sizeof(payload),
 			      "the writer stored %u bytes, expected %u", wav.data_size,
 			      (unsigned int)sizeof(payload));
-		zassert_equal((size_t)read, WAV_PARSER_MIN_HEADER_SIZE + sizeof(payload),
+		zassert_equal(read, WAV_PARSER_MIN_HEADER_SIZE + sizeof(payload),
 			      "output file is the wrong length");
 	}
 }
@@ -361,8 +272,10 @@ ZTEST(audio_pipeline_negative, test_processing_error_emits_error_event_with_code
 	 * nodes remap a stray -EPIPE to, so it is the natural stand-in for a disk
 	 * that stops accepting data mid-stream (spec §12.3).
 	 */
-	neg_fault_source_state.good_frames = 1U;
-	neg_fault_source_state.fail_ret = -EIO;
+	audio_fake_source_reset(&neg_fault_source_state);
+	neg_fault_source_state.frames_total = AUDIO_FAKE_ENDLESS;
+	neg_fault_source_state.fail_at_frame = 2U; /* one good frame, then fail */
+	neg_fault_source_state.process_ret = -EIO;
 
 	zassert_equal(audio_pipeline_init(&neg_fault_pipeline, &neg_config, &neg_fault_writer), 0,
 		      "init failed");
@@ -402,6 +315,10 @@ ZTEST(audio_pipeline_negative, test_sink_rejects_data_chunk_overflow)
 	struct audio_file_writer_state *state = neg_efbig_writer.state;
 	size_t produced = 1;
 	int ret;
+
+	audio_fake_source_reset(&neg_efbig_source_state);
+	neg_efbig_source_state.frames_total = AUDIO_FAKE_ENDLESS;
+	neg_efbig_source_state.chunk = 2U; /* one stereo frame per call */
 
 	zassert_equal(audio_node_open(&neg_efbig_writer), 0, "open failed");
 

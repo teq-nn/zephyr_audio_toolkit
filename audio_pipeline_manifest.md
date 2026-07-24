@@ -179,6 +179,8 @@ zephyr-audio-pipeline/
    │  ├─ app.overlay         # zephyr,ram-disk backing the ext2 fixture mount
    │  ├─ wav_fixture.h       # shared fixture: mount, raw writer, WAV generator
    │  ├─ wav_fixture.c
+   │  ├─ fake_nodes.h        # shared fakes: scripted source, counting sink, read back
+   │  ├─ fake_nodes.c
    │  ├─ Kconfig
    │  ├─ prj.conf
    │  ├─ testcase.yaml

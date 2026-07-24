@@ -15,7 +15,6 @@
 #include <errno.h>
 #include <string.h>
 
-#include <zephyr/fs/fs.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
@@ -26,6 +25,7 @@
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
 
+#include "fake_nodes.h"
 #include "wav_fixture.h"
 #include "wav_parser.h"
 
@@ -103,28 +103,6 @@ static void build_golden_samples(void)
 	}
 }
 
-/** Read @p path in full into @p buf; fails the test if it does not fit. */
-static size_t read_file(const char *path, uint8_t *buf, size_t cap)
-{
-	struct fs_file_t file;
-	ssize_t read;
-	int ret;
-
-	memset(buf, 0, cap);
-	fs_file_t_init(&file);
-
-	ret = fs_open(&file, path, FS_O_READ);
-	zassert_equal(ret, 0, "%s: could not be opened for read back (%d)", path, ret);
-
-	read = fs_read(&file, buf, cap);
-	zassert_true(read >= 0, "%s: read back failed (%d)", path, (int)read);
-	zassert_true((size_t)read < cap, "%s: file does not fit the read buffer", path);
-
-	zassert_equal(fs_close(&file), 0, "%s: close after read back failed", path);
-
-	return (size_t)read;
-}
-
 /* Drive a pipeline from a golden source until it reports a clean EOF, then join
  * so the sink's output file is finalised. Fails the test on any other outcome.
  */
@@ -173,8 +151,9 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_reproduces_golden_master)
 
 	run_to_eof(&rt_pipeline, &rt_writer);
 
-	golden_len = read_file(AUDIO_TEST_PATH("rt_golden.wav"), golden_buf, sizeof(golden_buf));
-	out_len = read_file(AUDIO_TEST_PATH("rt_out.wav"), out_buf, sizeof(out_buf));
+	golden_len = audio_test_read_file(AUDIO_TEST_PATH("rt_golden.wav"), golden_buf,
+					  sizeof(golden_buf));
+	out_len = audio_test_read_file(AUDIO_TEST_PATH("rt_out.wav"), out_buf, sizeof(out_buf));
 
 	/* The whole point of the ticket: identical size, then identical bytes. */
 	zassert_equal(golden_len, RT_FILE_BYTES, "golden master is %zu bytes, expected %u",
@@ -199,8 +178,9 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_gain_transforms_samples)
 
 	run_to_eof(&rt_gain_pipeline, &rt_gain_writer);
 
-	golden_len = read_file(AUDIO_TEST_PATH("rt_golden.wav"), golden_buf, sizeof(golden_buf));
-	out_len = read_file(AUDIO_TEST_PATH("rt_gain.wav"), out_buf, sizeof(out_buf));
+	golden_len = audio_test_read_file(AUDIO_TEST_PATH("rt_golden.wav"), golden_buf,
+					  sizeof(golden_buf));
+	out_len = audio_test_read_file(AUDIO_TEST_PATH("rt_gain.wav"), out_buf, sizeof(out_buf));
 
 	/* Same shape as the master: a valid PCM WAV of identical length. */
 	zassert_equal(out_len, golden_len, "half-gain output changed the file length");

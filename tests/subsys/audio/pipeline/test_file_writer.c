@@ -24,6 +24,7 @@
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
 
+#include "fake_nodes.h"
 #include "wav_fixture.h"
 #include "wav_parser.h"
 
@@ -38,74 +39,16 @@
 
 #define WRITER_FRAME_SAMPLES 16
 
-/* -------------------------------------------------------------------------
- * A scripted source, so a test can hand the sink exact container values and
- * exact frame lengths without going through a file first.
- * ----------------------------------------------------------------------
+/* The scripted source of fake_nodes.h hands the sink exact container values
+ * and exact frame lengths, without going through a file first.
  */
-
-struct script_source_state {
-	const int32_t *samples;
-	size_t count;
-	/* Samples per process() call; 0 means "as many as still fit". */
-	size_t chunk;
-	size_t pos;
-};
-
-static int script_source_open(struct audio_node *node)
-{
-	struct script_source_state *state = node->state;
-
-	state->pos = 0;
-
-	return 0;
-}
-
-static int script_source_process(struct audio_node *node, struct audio_buffer_view *buf,
-				 size_t *out_size)
-{
-	struct script_source_state *state = node->state;
-	size_t n = state->count - state->pos;
-
-	if (state->chunk != 0U) {
-		n = MIN(n, state->chunk);
-	}
-	n = MIN(n, buf->capacity);
-
-	memcpy(buf->data, &state->samples[state->pos], n * sizeof(int32_t));
-	state->pos += n;
-
-	buf->size = n;
-	*out_size = n;
-
-	return 0;
-}
-
-static int script_source_close(struct audio_node *node)
-{
-	ARG_UNUSED(node);
-
-	return 0;
-}
-
-static const struct audio_node_ops script_source_ops = {
-	.open = script_source_open,
-	.process = script_source_process,
-	.close = script_source_close,
-};
-
-#define SCRIPT_SOURCE_DEFINE(_name)                                                          \
-	static struct script_source_state _name##_state;                                     \
-	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &script_source_ops, NULL,           \
-			  &_name##_state)
-
-SCRIPT_SOURCE_DEFINE(hdr_source);
-SCRIPT_SOURCE_DEFINE(conv_source);
-SCRIPT_SOURCE_DEFINE(fmt_source);
-SCRIPT_SOURCE_DEFINE(eof_source);
-SCRIPT_SOURCE_DEFINE(abort_source);
-SCRIPT_SOURCE_DEFINE(reopen_source);
-SCRIPT_SOURCE_DEFINE(odd_source);
+AUDIO_FAKE_SOURCE_DEFINE(hdr_source);
+AUDIO_FAKE_SOURCE_DEFINE(conv_source);
+AUDIO_FAKE_SOURCE_DEFINE(fmt_source);
+AUDIO_FAKE_SOURCE_DEFINE(eof_source);
+AUDIO_FAKE_SOURCE_DEFINE(abort_source);
+AUDIO_FAKE_SOURCE_DEFINE(reopen_source);
+AUDIO_FAKE_SOURCE_DEFINE(odd_source);
 
 AUDIO_FILE_WRITER_NODE_DEFINE(hdr_writer, &hdr_source, AUDIO_TEST_PATH("w_hdr.wav"));
 AUDIO_FILE_WRITER_NODE_DEFINE(conv_writer, &conv_source, AUDIO_TEST_PATH("w_conv.wav"));
@@ -171,28 +114,6 @@ BUILD_ASSERT(ARRAY_SIZE(narrow_in) == ARRAY_SIZE(narrow_expect));
 
 static uint8_t file_buf[512];
 
-/** Read @p path in full; fails the test if it does not fit @ref file_buf. */
-static size_t read_back(const char *path)
-{
-	struct fs_file_t file;
-	ssize_t read;
-	int ret;
-
-	memset(file_buf, 0, sizeof(file_buf));
-	fs_file_t_init(&file);
-
-	ret = fs_open(&file, path, FS_O_READ);
-	zassert_equal(ret, 0, "%s: could not be reopened (%d)", path, ret);
-
-	read = fs_read(&file, file_buf, sizeof(file_buf));
-	zassert_true(read >= 0, "%s: read back failed (%d)", path, (int)read);
-	zassert_true((size_t)read < sizeof(file_buf), "%s: does not fit the test buffer", path);
-
-	zassert_equal(fs_close(&file), 0, "%s: close after read back failed", path);
-
-	return (size_t)read;
-}
-
 /*
  * Round-trip the produced file through the parser the *reader* uses and
  * cross-check the two size fields against the real file length: a header whose
@@ -203,7 +124,7 @@ static void assert_valid_wav(const char *path, uint32_t rate, uint16_t channels,
 			     uint32_t data_bytes)
 {
 	struct wav_parser_result wav;
-	size_t len = read_back(path);
+	size_t len = audio_test_read_file(path, file_buf, sizeof(file_buf));
 	uint32_t riff_size;
 	int ret;
 
@@ -259,7 +180,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_writes_valid_wav)
 	size_t produced = 0;
 
 	hdr_source_state.samples = narrow_in;
-	hdr_source_state.count = ARRAY_SIZE(narrow_in);
+	hdr_source_state.sample_count = ARRAY_SIZE(narrow_in);
 	hdr_source_state.chunk = 0;
 
 	zassert_equal(audio_node_open(&hdr_writer), 0, "open failed");
@@ -288,7 +209,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_writes_configured_format)
 	size_t produced = 0;
 
 	fmt_source_state.samples = narrow_in;
-	fmt_source_state.count = 6U;
+	fmt_source_state.sample_count = 6U;
 	fmt_source_state.chunk = 0;
 
 	/* Mono at 44.1 kHz: the header has to follow the state, not the
@@ -371,9 +292,9 @@ ZTEST(audio_pipeline_file_writer, test_sink_close_finalises_and_allows_reopen)
 	 * of appending to whatever was there.
 	 */
 	for (round = 1U; round <= ARRAY_SIZE(narrow_in) / 2U; round++) {
-		reopen_source_state.count = round * 2U;
+		reopen_source_state.sample_count = round * 2U;
 		/* Only the sink is reopened here, so rewind the script by hand. */
-		reopen_source_state.pos = 0;
+		audio_fake_source_rewind(&reopen_source_state);
 
 		zassert_equal(audio_node_open(&reopen_writer), 0, "open failed in round %u",
 			      round);
@@ -410,7 +331,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_narrows_s32_to_s16)
 	size_t i;
 
 	conv_source_state.samples = narrow_in;
-	conv_source_state.count = ARRAY_SIZE(narrow_in);
+	conv_source_state.sample_count = ARRAY_SIZE(narrow_in);
 	/* Four samples per frame, so the payload is stitched from four writes
 	 * and an off-by-one in the chunking shows up as a shifted sample.
 	 */
@@ -456,7 +377,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_rejects_partial_sample_frame)
 	/* Three samples into a stereo sink: writing them would swap left and
 	 * right for the whole rest of the file, so it must be an error.
 	 */
-	odd_source_state.count = 3U;
+	odd_source_state.sample_count = 3U;
 	odd_source_state.chunk = 0;
 
 	zassert_equal(audio_node_open(&odd_writer), 0, "open failed");
@@ -491,7 +412,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_propagates_eof_without_appending)
 	unsigned int i;
 
 	eof_source_state.samples = narrow_in;
-	eof_source_state.count = 4U;
+	eof_source_state.sample_count = 4U;
 	eof_source_state.chunk = 0;
 
 	zassert_equal(audio_node_open(&eof_writer), 0, "open failed");
@@ -578,7 +499,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_reports_write_error_and_leaves_empty
 	int ret;
 
 	abort_source_state.samples = narrow_in;
-	abort_source_state.count = 8U;
+	abort_source_state.sample_count = 8U;
 	abort_source_state.chunk = 4U;
 
 	zassert_equal(audio_node_open(&abort_writer), 0, "open failed");
@@ -610,7 +531,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_reports_write_error_and_leaves_empty
 	 * header admits - an aborted run yields an empty track, never a bogus
 	 * length.
 	 */
-	len = read_back(AUDIO_TEST_PATH("w_abort.wav"));
+	len = audio_test_read_file(AUDIO_TEST_PATH("w_abort.wav"), file_buf, sizeof(file_buf));
 	zassert_equal(wav_parser_read_header(file_buf, len, &wav), 0,
 		      "even an unfinalised file must carry a parsable header");
 	zassert_equal(wav.data_size, 0U, "an unfinalised file must not claim payload");

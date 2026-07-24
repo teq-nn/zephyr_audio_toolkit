@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/ztest.h>
 
 #include <zephyr/audio/audio_node.h>
@@ -21,6 +22,7 @@
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
 
+#include "fake_nodes.h"
 #include "wav_fixture.h"
 
 /* Two pipelines deliberately get different frame sizes: a shared frame buffer
@@ -32,161 +34,27 @@
 #define CONCURRENT_FRAMES 24U
 
 #define TEST_EVENT_TIMEOUT K_MSEC(2000)
-/* The lock-step barrier below waits with a timeout instead of K_FOREVER so a
- * broken pipeline fails an assertion rather than hanging the suite.
- */
-#define TEST_BARRIER_TIMEOUT K_MSEC(500)
 
 /*
- * Per-pipeline probe state. The source and the sink of one pipeline share it,
- * which is exactly what makes cross-talk between the two pipelines visible:
- * the source stamps every sample with its own pattern and the sink verifies
- * that nothing else wrote into the frame it is handed.
+ * Two statically wired chains, source -> sink, one per pipeline, built from the
+ * shared fakes. Cross-talk between the pipelines is what the probes make
+ * visible: each source stamps every sample with its own pattern and each sink
+ * verifies that nothing else wrote into the frame it was handed. The DECLARE
+ * macro is what another translation unit would use to reach a node; spelling it
+ * out here as well keeps that form covered by the build.
  */
-struct probe_state {
-	int32_t pattern;
-	size_t expected_capacity;
-	int open_calls;
-	int open_ret;
-	size_t frames_total;
-	size_t frames_done;
-	size_t frames_seen;
-	size_t corrupt_frames;
-	size_t wrong_capacity;
-	size_t barrier_timeouts;
-	size_t eof_seen;
-	const int32_t *seen_buf;
-	k_tid_t worker;
+AUDIO_NODE_DECLARE(probe_sink_a);
+AUDIO_FAKE_SOURCE_DEFINE(probe_source_a);
+AUDIO_FAKE_SINK_DEFINE(probe_sink_a, &probe_source_a);
 
-	/* Lock-step barrier: released by this pipeline, waited on by the other. */
-	struct k_sem *filled;
-	struct k_sem *peer_filled;
-	bool barrier_enabled;
-};
+AUDIO_FAKE_SOURCE_DEFINE(probe_source_b);
+AUDIO_FAKE_SINK_DEFINE(probe_sink_b, &probe_source_b);
 
-static struct probe_state probe_a;
-static struct probe_state probe_b;
-
+/* Lock-step barriers: released by one pipeline, waited on by the other. */
 static struct k_sem probe_a_filled;
 static struct k_sem probe_b_filled;
 static struct k_sem probe_a_eof;
 static struct k_sem probe_b_eof;
-
-/*
- * Shared by every probe node, including the stateless ones further down, hence
- * the NULL check. @c open_ret is the seam the event-isolation test uses to make
- * each pipeline raise a *distinguishable* ERROR event.
- */
-static int probe_open(struct audio_node *node)
-{
-	struct probe_state *state = node->state;
-
-	if (state == NULL) {
-		return 0;
-	}
-
-	state->open_calls++;
-
-	return state->open_ret;
-}
-
-static int probe_close(struct audio_node *node)
-{
-	ARG_UNUSED(node);
-	return 0;
-}
-
-static int probe_source_process(struct audio_node *node, struct audio_buffer_view *buf,
-				size_t *out_size)
-{
-	struct probe_state *state = node->state;
-	size_t i;
-
-	if (state->frames_done >= state->frames_total) {
-		*out_size = 0;
-		return 0;
-	}
-
-	for (i = 0; i < buf->capacity; i++) {
-		buf->data[i] = state->pattern;
-	}
-
-	state->frames_done++;
-	*out_size = buf->capacity;
-
-	/* Hand over to the peer pipeline in the middle of the frame. Once both
-	 * workers have stamped their own buffer, each of them verifies it; a
-	 * shared frame buffer therefore corrupts a frame every single time
-	 * instead of only under lucky timing.
-	 */
-	if (state->barrier_enabled) {
-		k_sem_give(state->filled);
-		if (k_sem_take(state->peer_filled, TEST_BARRIER_TIMEOUT) != 0) {
-			state->barrier_timeouts++;
-		}
-	}
-
-	return 0;
-}
-
-static int probe_sink_process(struct audio_node *node, struct audio_buffer_view *buf,
-			      size_t *out_size)
-{
-	struct probe_state *state = node->state;
-	size_t i;
-	int ret;
-
-	state->worker = k_current_get();
-	state->seen_buf = buf->data;
-
-	if (buf->capacity != state->expected_capacity) {
-		state->wrong_capacity++;
-	}
-
-	ret = audio_node_process(node->upstream, buf, out_size);
-	if (ret < 0) {
-		return ret;
-	}
-
-	if (*out_size == 0U) {
-		state->eof_seen++;
-		return 0;
-	}
-
-	for (i = 0; i < *out_size; i++) {
-		if (buf->data[i] != state->pattern) {
-			state->corrupt_frames++;
-			break;
-		}
-	}
-
-	state->frames_seen++;
-
-	return 0;
-}
-
-static const struct audio_node_ops probe_source_ops = {
-	.open = probe_open,
-	.process = probe_source_process,
-	.close = probe_close,
-};
-
-static const struct audio_node_ops probe_sink_ops = {
-	.open = probe_open,
-	.process = probe_sink_process,
-	.close = probe_close,
-};
-
-/* Statically wired chains: source -> sink, one per pipeline. The DECLARE
- * macros are what another translation unit would use to reach them; declaring
- * them here as well keeps that spelling covered by the build.
- */
-AUDIO_NODE_DECLARE(probe_sink_a);
-AUDIO_NODE_DEFINE(probe_source_a, AUDIO_NODE_ROLE_SOURCE, &probe_source_ops, NULL, &probe_a);
-AUDIO_NODE_DEFINE(probe_sink_a, AUDIO_NODE_ROLE_SINK, &probe_sink_ops, &probe_source_a, &probe_a);
-
-AUDIO_NODE_DEFINE(probe_source_b, AUDIO_NODE_ROLE_SOURCE, &probe_source_ops, NULL, &probe_b);
-AUDIO_NODE_DEFINE(probe_sink_b, AUDIO_NODE_ROLE_SINK, &probe_sink_ops, &probe_source_b, &probe_b);
 
 static void probe_event_cb(const struct audio_pipeline_event *event, void *user_data)
 {
@@ -232,32 +100,11 @@ AUDIO_PIPELINE_DEFINE(pipeline_b, PIPELINE_B_FRAME_SAMPLES,
  */
 static struct audio_pipeline builtin_pipeline;
 
-/* Node instances for the per-node state tests. */
-static int32_t const_source_value;
-
-static int const_source_process(struct audio_node *node, struct audio_buffer_view *buf,
-				size_t *out_size)
-{
-	size_t i;
-
-	ARG_UNUSED(node);
-
-	for (i = 0; i < buf->capacity; i++) {
-		buf->data[i] = const_source_value;
-	}
-
-	*out_size = buf->capacity;
-
-	return 0;
-}
-
-static const struct audio_node_ops const_source_ops = {
-	.open = probe_open,
-	.process = const_source_process,
-	.close = probe_close,
-};
-
-AUDIO_NODE_DEFINE(const_source, AUDIO_NODE_ROLE_SOURCE, &const_source_ops, NULL, NULL);
+/* Node instances for the per-node state tests: an endless source of one
+ * constant container value, so a filter's own arithmetic is all that changes
+ * between two instances.
+ */
+AUDIO_FAKE_SOURCE_DEFINE(const_source);
 AUDIO_GAIN_FILTER_NODE_DEFINE(gain_half, &const_source, AUDIO_GAIN_UNITY_Q15 / 2);
 AUDIO_GAIN_FILTER_NODE_DEFINE(gain_unity, &const_source, AUDIO_GAIN_UNITY_Q15);
 AUDIO_NULL_SINK_NODE_DEFINE(half_sink, &gain_half);
@@ -273,14 +120,20 @@ AUDIO_FILE_READER_NODE_DEFINE(reader_b, AUDIO_TEST_PATH("b.wav"));
  */
 static const int16_t reader_payload[8] = {1, -1, 2, -2, 3, -3, 4, -4};
 
-static void probe_reset(struct probe_state *state, int32_t pattern, size_t expected_capacity,
-			struct k_sem *filled, struct k_sem *peer_filled)
+/* Wipe one probe chain and give the source and the sink a shared pattern, so a
+ * frame written by the peer pipeline cannot pass the sink's check.
+ */
+static void probe_reset(struct audio_fake_source *src, struct audio_fake_sink *sink,
+			int32_t pattern, size_t expected_capacity)
 {
-	memset(state, 0, sizeof(*state));
-	state->pattern = pattern;
-	state->expected_capacity = expected_capacity;
-	state->filled = filled;
-	state->peer_filled = peer_filled;
+	audio_fake_source_reset(src);
+	audio_fake_sink_reset(sink);
+
+	src->pattern = pattern;
+
+	sink->check_pattern = true;
+	sink->expect_pattern = pattern;
+	sink->expect_capacity = expected_capacity;
 }
 
 static void static_define_before(void *fixture)
@@ -291,10 +144,13 @@ static void static_define_before(void *fixture)
 	 * their resource fields, and wiping them would hand the pipelines back
 	 * to the built-in defaults.
 	 */
-	probe_reset(&probe_a, 0x0a0a0a0a, PIPELINE_A_FRAME_SAMPLES, &probe_a_filled,
-		    &probe_b_filled);
-	probe_reset(&probe_b, 0x0b0b0b0b, PIPELINE_B_FRAME_SAMPLES, &probe_b_filled,
-		    &probe_a_filled);
+	probe_reset(&probe_source_a_state, &probe_sink_a_state, 0x0a0a0a0a,
+		    PIPELINE_A_FRAME_SAMPLES);
+	probe_reset(&probe_source_b_state, &probe_sink_b_state, 0x0b0b0b0b,
+		    PIPELINE_B_FRAME_SAMPLES);
+
+	audio_fake_source_reset(&const_source_state);
+	const_source_state.frames_total = AUDIO_FAKE_ENDLESS;
 
 	k_sem_init(&probe_a_filled, 0, CONCURRENT_FRAMES + 1U);
 	k_sem_init(&probe_b_filled, 0, CONCURRENT_FRAMES + 1U);
@@ -418,8 +274,8 @@ ZTEST(audio_pipeline_static_define, test_pipeline_define_keeps_events_per_instan
 	 * look right if both instances wrote into one ring buffer, but two
 	 * different error codes cannot.
 	 */
-	probe_a.open_ret = -EIO;
-	probe_b.open_ret = -ENOMEM;
+	probe_sink_a_state.open_ret = -EIO;
+	probe_sink_b_state.open_ret = -ENOMEM;
 
 	zassert_equal(audio_pipeline_start(&pipeline_a), -EIO, "A did not report its open error");
 	zassert_equal(audio_pipeline_start(&pipeline_b), -ENOMEM,
@@ -440,10 +296,10 @@ ZTEST(audio_pipeline_static_define, test_pipeline_define_keeps_events_per_instan
 		      "queue B also received pipeline A's event");
 
 	/* Same story for the worker thread's EOF events: one per instance. */
-	probe_a.open_ret = 0;
-	probe_b.open_ret = 0;
-	probe_a.frames_total = 2U;
-	probe_b.frames_total = 4U;
+	probe_sink_a_state.open_ret = 0;
+	probe_sink_b_state.open_ret = 0;
+	probe_source_a_state.frames_total = 2U;
+	probe_source_b_state.frames_total = 4U;
 
 	zassert_equal(audio_pipeline_start(&pipeline_a), 0, "restart A failed");
 	zassert_equal(audio_pipeline_start(&pipeline_b), 0, "restart B failed");
@@ -462,31 +318,41 @@ ZTEST(audio_pipeline_static_define, test_pipeline_define_keeps_events_per_instan
 	zassert_equal(audio_pipeline_get_event(&pipeline_b, &event, K_NO_WAIT), -ENOMSG,
 		      "queue B saw more than its own EOF");
 
-	zassert_equal(probe_a.frames_seen, 2U, "pipeline A lost frames");
-	zassert_equal(probe_b.frames_seen, 4U, "pipeline B lost frames");
+	zassert_equal(atomic_get(&probe_sink_a_state.frames_seen), 2U, "pipeline A lost frames");
+	zassert_equal(atomic_get(&probe_sink_b_state.frames_seen), 4U, "pipeline B lost frames");
 }
 
 ZTEST(audio_pipeline_static_define, test_pipeline_define_processes_on_its_own_buffer)
 {
-	probe_a.frames_total = 1U;
+	probe_source_a_state.frames_total = 1U;
 
 	zassert_equal(audio_pipeline_init(&pipeline_a, &config_a, &probe_sink_a), 0,
 		      "init A failed");
 	zassert_equal(audio_pipeline_process_frame(&pipeline_a), 0, "frame not produced");
 
-	zassert_equal_ptr(probe_a.seen_buf, pipeline_a.frame_buf,
+	zassert_equal_ptr(atomic_ptr_get(&probe_sink_a_state.seen_buf), pipeline_a.frame_buf,
 			  "chain did not run on the instance's own frame buffer");
-	zassert_equal(probe_a.frames_seen, 1U, "sink saw no frame");
-	zassert_equal(probe_a.corrupt_frames, 0U, "frame content corrupted");
-	zassert_equal(probe_a.wrong_capacity, 0U, "sink saw the wrong frame capacity");
+	zassert_equal(atomic_get(&probe_sink_a_state.frames_seen), 1U, "sink saw no frame");
+	zassert_equal(atomic_get(&probe_sink_a_state.corrupt_frames), 0U,
+		      "frame content corrupted");
+	zassert_equal(atomic_get(&probe_sink_a_state.wrong_capacity), 0U,
+		      "sink saw the wrong frame capacity");
 }
 
 ZTEST(audio_pipeline_static_define, test_two_pipelines_run_concurrently)
 {
-	probe_a.frames_total = CONCURRENT_FRAMES;
-	probe_b.frames_total = CONCURRENT_FRAMES;
-	probe_a.barrier_enabled = true;
-	probe_b.barrier_enabled = true;
+	struct audio_fake_sink *sink_a = &probe_sink_a_state;
+	struct audio_fake_sink *sink_b = &probe_sink_b_state;
+
+	probe_source_a_state.frames_total = CONCURRENT_FRAMES;
+	probe_source_b_state.frames_total = CONCURRENT_FRAMES;
+	/* Each source releases its own barrier and then waits on the peer's, so
+	 * both workers are pinned to the same frame.
+	 */
+	probe_source_a_state.frame_sem = &probe_a_filled;
+	probe_source_a_state.peer_sem = &probe_b_filled;
+	probe_source_b_state.frame_sem = &probe_b_filled;
+	probe_source_b_state.peer_sem = &probe_a_filled;
 
 	zassert_equal(audio_pipeline_init(&pipeline_a, &config_a, &probe_sink_a), 0,
 		      "init A failed");
@@ -506,18 +372,24 @@ ZTEST(audio_pipeline_static_define, test_two_pipelines_run_concurrently)
 	zassert_equal(k_sem_take(&probe_a_eof, TEST_EVENT_TIMEOUT), 0, "pipeline A never hit EOF");
 	zassert_equal(k_sem_take(&probe_b_eof, TEST_EVENT_TIMEOUT), 0, "pipeline B never hit EOF");
 
-	zassert_equal(probe_a.barrier_timeouts, 0U, "pipeline A did not run alongside B");
-	zassert_equal(probe_b.barrier_timeouts, 0U, "pipeline B did not run alongside A");
+	zassert_equal(atomic_get(&probe_source_a_state.peer_timeouts), 0U,
+		      "pipeline A did not run alongside B");
+	zassert_equal(atomic_get(&probe_source_b_state.peer_timeouts), 0U,
+		      "pipeline B did not run alongside A");
 
-	zassert_equal(probe_a.frames_seen, CONCURRENT_FRAMES, "pipeline A lost frames");
-	zassert_equal(probe_b.frames_seen, CONCURRENT_FRAMES, "pipeline B lost frames");
-	zassert_equal(probe_a.corrupt_frames, 0U, "pipeline B wrote into A's frame buffer");
-	zassert_equal(probe_b.corrupt_frames, 0U, "pipeline A wrote into B's frame buffer");
-	zassert_equal(probe_a.wrong_capacity, 0U, "pipeline A ran with B's frame capacity");
-	zassert_equal(probe_b.wrong_capacity, 0U, "pipeline B ran with A's frame capacity");
+	zassert_equal(atomic_get(&sink_a->frames_seen), CONCURRENT_FRAMES,
+		      "pipeline A lost frames");
+	zassert_equal(atomic_get(&sink_b->frames_seen), CONCURRENT_FRAMES,
+		      "pipeline B lost frames");
+	zassert_equal(atomic_get(&sink_a->corrupt_frames), 0U, "pipeline B wrote into A's frames");
+	zassert_equal(atomic_get(&sink_b->corrupt_frames), 0U, "pipeline A wrote into B's frames");
+	zassert_equal(atomic_get(&sink_a->wrong_capacity), 0U, "pipeline A ran with B's capacity");
+	zassert_equal(atomic_get(&sink_b->wrong_capacity), 0U, "pipeline B ran with A's capacity");
 
-	zassert_true(probe_a.worker != probe_b.worker, "both pipelines ran on one thread");
-	zassert_true(probe_a.worker != k_current_get(), "pipeline A ran on the test thread");
+	zassert_true(atomic_ptr_get(&sink_a->worker) != atomic_ptr_get(&sink_b->worker),
+		     "both pipelines ran on one thread");
+	zassert_true(atomic_ptr_get(&sink_a->worker) != k_current_get(),
+		     "pipeline A ran on the test thread");
 
 	zassert_true(audio_pipeline_is_running(&pipeline_a), "EOF killed worker A");
 	zassert_true(audio_pipeline_is_running(&pipeline_b), "EOF killed worker B");
@@ -530,10 +402,10 @@ ZTEST(audio_pipeline_static_define, test_two_pipelines_run_concurrently)
 ZTEST(audio_pipeline_static_define, test_node_define_wires_the_chain_statically)
 {
 	zassert_equal(probe_sink_a.role, AUDIO_NODE_ROLE_SINK, "wrong sink role");
-	zassert_equal_ptr(probe_sink_a.ops, &probe_sink_ops, "wrong sink ops");
+	zassert_equal_ptr(probe_sink_a.ops, &audio_fake_sink_ops, "wrong sink ops");
 	zassert_equal_ptr(probe_sink_a.upstream, &probe_source_a, "sink not wired to its source");
 	zassert_equal_ptr(probe_source_a.upstream, NULL, "a source must have no upstream");
-	zassert_equal_ptr(probe_sink_a.state, &probe_a, "wrong sink state");
+	zassert_equal_ptr(probe_sink_a.state, &probe_sink_a_state, "wrong sink state");
 
 	zassert_equal(gain_half.role, AUDIO_NODE_ROLE_FILTER, "wrong filter role");
 	zassert_equal_ptr(gain_half.upstream, &const_source, "filter not wired to its source");
@@ -556,7 +428,7 @@ ZTEST(audio_pipeline_static_define, test_node_define_gain_state_is_per_instance)
 
 	zassert_true(gain_half.state != gain_unity.state, "gain filters share their state");
 
-	const_source_value = 1000;
+	const_source_state.pattern = 1000;
 
 	zassert_equal(audio_node_open(&gain_half), 0, "open half failed");
 	zassert_equal(audio_node_open(&gain_unity), 0, "open unity failed");
