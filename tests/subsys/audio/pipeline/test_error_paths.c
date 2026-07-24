@@ -25,10 +25,10 @@
 #include <zephyr/audio/audio_nodes.h>
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
+#include <zephyr/audio/audio_wav.h>
 
 #include "fake_nodes.h"
 #include "wav_fixture.h"
-#include "wav_parser.h"
 
 /* =========================================================================
  * Suite 1: audio_pipeline - control API guards and a lifecycle smoke test.
@@ -243,18 +243,18 @@ ZTEST(audio_pipeline_negative, test_source_truncated_file_reports_clean_eof)
 	 */
 	{
 		static uint8_t trunc_buf[128];
-		struct wav_parser_result wav;
+		struct audio_wav_header wav;
 		size_t read;
 
 		read = audio_test_read_file(AUDIO_TEST_PATH("neg_trunc_out.wav"), trunc_buf,
 					    sizeof(trunc_buf));
 
-		zassert_equal(wav_parser_read_header(trunc_buf, read, &wav), 0,
+		zassert_equal(audio_wav_read_header(trunc_buf, read, &wav), 0,
 			      "the sink left an unparsable file");
 		zassert_equal(wav.data_size, sizeof(payload),
 			      "the writer stored %u bytes, expected %u", wav.data_size,
 			      (unsigned int)sizeof(payload));
-		zassert_equal(read, WAV_PARSER_MIN_HEADER_SIZE + sizeof(payload),
+		zassert_equal(read, AUDIO_WAV_MIN_HEADER_SIZE + sizeof(payload),
 			      "output file is the wrong length");
 	}
 }

@@ -150,7 +150,8 @@ zephyr-audio-pipeline/
 │  ├─ audio_node.h
 │  ├─ audio_nodes.h        # per-node state types, ops externs, node DEFINE macros
 │  ├─ audio_pipeline.h
-│  └─ audio_pipeline_events.h
+│  ├─ audio_pipeline_events.h
+│  └─ audio_wav.h          # RIFF/WAVE header: read and write, one byte layout
 ├─ subsys/audio/pipeline/
 │  ├─ CMakeLists.txt
 │  ├─ Kconfig
@@ -159,14 +160,12 @@ zephyr-audio-pipeline/
 │  ├─ audio_pipeline_events.c
 │  ├─ audio_node_core.c
 │  ├─ audio_internal.h
-│  ├─ nodes/
-│  │   ├─ file_reader_node.c
-│  │   ├─ file_writer_node.c
-│  │   ├─ gain_filter_node.c
-│  │   └─ null_sink_node.c
-│  └─ util/
-│      ├─ wav_parser.c
-│      └─ wav_parser.h
+│  ├─ audio_wav.c
+│  └─ nodes/
+│      ├─ file_reader_node.c
+│      ├─ file_writer_node.c
+│      ├─ gain_filter_node.c
+│      └─ null_sink_node.c
 ├─ samples/audio/pipeline_basic/
 │  ├─ CMakeLists.txt
 │  ├─ Kconfig
@@ -191,10 +190,10 @@ zephyr-audio-pipeline/
    │  ├─ test_events.c           # k_msgq event queue
    │  ├─ test_file_reader.c      # WAV source, S16→S32 widening
    │  └─ test_file_writer.c      # WAV sink, S32→S16 truncation
-   └─ wav_parser/                # standalone unit test, no CONFIG_AUDIO_PIPELINE
+   └─ wav/                       # standalone unit test, no CONFIG_AUDIO_PIPELINE
       ├─ CMakeLists.txt
       ├─ prj.conf
       ├─ testcase.yaml
-      └─ test_wav_parser.c
+      └─ test_wav.c              # header write/read round trip, parser errors
 ```
 This document is our shared engineering contract.

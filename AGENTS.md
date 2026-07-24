@@ -10,10 +10,10 @@
 This repository is an out-of-tree Zephyr module. The tree follows manifest §12 / spec §14 — keep it that way and document any new file tree in the manifest to preserve the systems view.
 
 - `zephyr/module.yml` is the Zephyr module manifest; `CMakeLists.txt` and `Kconfig` at the repository root are the module glue it points at (`cmake: .`, `kconfig: Kconfig`, both resolved from the module root). The file must live in `zephyr/` — `scripts/zephyr_module.py` only looks for `zephyr/module.{yml,yaml}`, so a root-level `module.yml` is silently ignored and `CONFIG_AUDIO_PIPELINE` never gets defined.
-- `include/zephyr/audio/` holds the public headers (`audio_format.h`, `audio_node.h`, `audio_nodes.h`, `audio_pipeline.h`, `audio_pipeline_events.h`); applications include them as `<zephyr/audio/...>`. `audio_nodes.h` carries the per-node state types, the `<role>_node_ops` externs, and the node `*_DEFINE` macros.
-- `subsys/audio/pipeline/` holds the implementation (`audio_pipeline_core.c`, `audio_pipeline_config.c`, `audio_pipeline_events.c`, `audio_node_core.c`, private `audio_internal.h`), with node implementations under `nodes/` and helpers under `util/`.
+- `include/zephyr/audio/` holds the public headers (`audio_format.h`, `audio_node.h`, `audio_nodes.h`, `audio_pipeline.h`, `audio_pipeline_events.h`, `audio_wav.h`); applications include them as `<zephyr/audio/...>`. `audio_nodes.h` carries the per-node state types, the `<role>_node_ops` externs, and the node `*_DEFINE` macros; `audio_wav.h` is the RIFF/WAVE header codec, and everything that reads or emits a WAV header goes through it rather than spelling out field offsets - the sole exception being tests that construct deliberately malformed headers the module refuses to produce.
+- `subsys/audio/pipeline/` holds the implementation (`audio_pipeline_core.c`, `audio_pipeline_config.c`, `audio_pipeline_events.c`, `audio_node_core.c`, `audio_wav.c`, private `audio_internal.h`), with node implementations under `nodes/`.
 - `samples/audio/pipeline_basic/` holds the reference application.
-- `tests/subsys/audio/pipeline/` holds the Ztest suites and fixture data.
+- `tests/subsys/audio/pipeline/` holds the pipeline Ztest suites and their shared fixture and fake nodes; `tests/subsys/audio/wav/` holds the standalone WAV header suite, which builds without `CONFIG_AUDIO_PIPELINE`.
 
 New sources belong in `subsys/audio/pipeline/` (and must be added to its `CMakeLists.txt`); new public API belongs in `include/zephyr/audio/`.
 
@@ -31,7 +31,7 @@ Run these from the repository root inside an initialised west workspace. If the 
 - Run `checkpatch.pl --strict` and `clang-format -style=file` (when provided) before submitting even documentation-owned changes touching code blocks.
 
 ## Testing Guidelines
-- Add Ztest cases under `tests/subsys/audio/pipeline/` and mirror the frame/EOF behaviors described in the manifest and spec §12. Each suite directory needs a `testcase.yaml` (plus `prj.conf`) for Twister to discover it.
+- Add Ztest cases under `tests/subsys/audio/pipeline/` (or `tests/subsys/audio/wav/` for the header codec) and mirror the frame/EOF behaviors described in the manifest and spec §12. Each suite directory needs a `testcase.yaml` (plus `prj.conf`) for Twister to discover it.
 - Name tests `test_<role>_<behavior>` (e.g., `test_sink_reports_eof`). Gate merges on the full Twister run plus hardware smoke tests for new sinks.
 - Tests must run on `native_sim`/QEMU without real audio hardware (spec §12.1).
 - Validate documentation changes by cross-referencing manifest/spec diffs; unresolved conflicts block release tagging.

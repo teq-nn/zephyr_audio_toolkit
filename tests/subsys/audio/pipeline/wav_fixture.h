@@ -60,7 +60,16 @@ int audio_test_fs_mount(void);
 /** @brief Write @p len bytes verbatim to @p path, truncating an older file. */
 int audio_test_write_raw(const char *path, const void *data, size_t len);
 
-/** @brief Write a RIFF/WAVE file described by @p spec to @p path. */
+/**
+ * @brief Write a RIFF/WAVE file described by @p spec to @p path.
+ *
+ * The header is serialised by the WAV module itself, so the file is exactly
+ * what the subsystem would have written - and a @p spec the module refuses
+ * (a degenerate rate, channel count or bit depth) comes back as ``-EINVAL``
+ * instead of a malformed file. Structurally valid but unsupported headers,
+ * such as a non-PCM @ref audio_test_wav_spec.format_tag, are still written:
+ * rejecting those is the file reader's job, and its suite tests it.
+ */
 int audio_test_write_wav(const char *path, const struct audio_test_wav_spec *spec);
 
 /**

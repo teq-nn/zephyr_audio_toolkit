@@ -19,10 +19,3 @@ target_sources(app PRIVATE
 	fake_nodes.c
 	wav_fixture.c
 )
-
-# The file node suites cross-check what they wrote against the parser the
-# subsystem itself uses. Only its header is needed here: wav_parser.c is
-# already part of the module library, and compiling it again would duplicate
-# the symbols.
-get_filename_component(AUDIO_PIPELINE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../.. ABSOLUTE)
-target_include_directories(app PRIVATE ${AUDIO_PIPELINE_ROOT}/subsys/audio/pipeline/util)

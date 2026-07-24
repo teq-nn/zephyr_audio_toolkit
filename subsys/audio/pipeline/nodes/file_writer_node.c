@@ -23,7 +23,6 @@
  */
 
 #include <errno.h>
-#include <string.h>
 
 #include <zephyr/fs/fs.h>
 #include <zephyr/logging/log.h>
@@ -32,8 +31,7 @@
 
 #include <zephyr/audio/audio_node.h>
 #include <zephyr/audio/audio_nodes.h>
-
-#include "../util/wav_parser.h"
+#include <zephyr/audio/audio_wav.h>
 
 LOG_MODULE_REGISTER(audio_file_writer, LOG_LEVEL_INF);
 
@@ -50,26 +48,6 @@ LOG_MODULE_REGISTER(audio_file_writer, LOG_LEVEL_INF);
  */
 #define FILE_WRITER_DEFAULT_RATE_HZ 48000U
 #define FILE_WRITER_DEFAULT_CHANNELS 2U
-
-/* Field offsets inside the canonical header the node emits. */
-#define FILE_WRITER_OFF_RIFF_SIZE   4U
-#define FILE_WRITER_OFF_WAVE	    8U
-#define FILE_WRITER_OFF_FMT_ID	    12U
-#define FILE_WRITER_OFF_FMT_SIZE    16U
-#define FILE_WRITER_OFF_FORMAT_TAG  20U
-#define FILE_WRITER_OFF_CHANNELS    22U
-#define FILE_WRITER_OFF_SAMPLE_RATE 24U
-#define FILE_WRITER_OFF_BYTE_RATE   28U
-#define FILE_WRITER_OFF_BLOCK_ALIGN 32U
-#define FILE_WRITER_OFF_BITS	    34U
-#define FILE_WRITER_OFF_DATA_ID	    36U
-#define FILE_WRITER_OFF_DATA_SIZE   40U
-
-/* Size of the PCM flavour of the "fmt " chunk body. */
-#define FILE_WRITER_FMT_CHUNK_SIZE 16U
-
-/* Header bytes counted by the RIFF size field: everything after it. */
-#define FILE_WRITER_RIFF_OVERHEAD (WAV_PARSER_MIN_HEADER_SIZE - 8U)
 
 /*
  * The pipeline reserves -EPIPE for "end of stream": audio_pipeline_process_frame()
@@ -89,32 +67,26 @@ static int file_writer_errno(int err)
 }
 
 /*
- * Serialise a canonical RIFF/WAVE header declaring @p data_bytes of payload.
- * @p header must have room for ::WAV_PARSER_MIN_HEADER_SIZE bytes. Everything is
- * written little endian explicitly, so the node produces the same file on a big
- * endian host.
+ * Serialise a canonical RIFF/WAVE header declaring @p data_bytes of payload
+ * into the @p len bytes at @p header.
+ *
+ * The byte layout belongs to the WAV module, which is also what the reader
+ * parses with, so the two sides of a file round trip cannot drift apart. The
+ * node only supplies the stream description - kept in one place here because
+ * both open() and the finalise path have to describe the same stream.
  */
-static void file_writer_build_header(const struct audio_file_writer_state *state,
-				     uint32_t data_bytes, uint8_t *header)
+static int file_writer_build_header(const struct audio_file_writer_state *state,
+				    uint32_t data_bytes, uint8_t *header, size_t len)
 {
-	uint16_t block_align =
-		(uint16_t)(state->fmt.channels * FILE_WRITER_BYTES_PER_SAMPLE);
+	const struct audio_wav_header hdr = {
+		.sample_rate_hz = state->fmt.sample_rate_hz,
+		.data_size = data_bytes,
+		.format_tag = AUDIO_WAV_FORMAT_PCM,
+		.channels = state->fmt.channels,
+		.bits_per_sample = FILE_WRITER_BITS_PER_SAMPLE,
+	};
 
-	memcpy(&header[0], "RIFF", 4);
-	sys_put_le32(FILE_WRITER_RIFF_OVERHEAD + data_bytes, &header[FILE_WRITER_OFF_RIFF_SIZE]);
-	memcpy(&header[FILE_WRITER_OFF_WAVE], "WAVE", 4);
-
-	memcpy(&header[FILE_WRITER_OFF_FMT_ID], "fmt ", 4);
-	sys_put_le32(FILE_WRITER_FMT_CHUNK_SIZE, &header[FILE_WRITER_OFF_FMT_SIZE]);
-	sys_put_le16(WAV_PARSER_FORMAT_PCM, &header[FILE_WRITER_OFF_FORMAT_TAG]);
-	sys_put_le16(state->fmt.channels, &header[FILE_WRITER_OFF_CHANNELS]);
-	sys_put_le32(state->fmt.sample_rate_hz, &header[FILE_WRITER_OFF_SAMPLE_RATE]);
-	sys_put_le32(state->fmt.sample_rate_hz * block_align, &header[FILE_WRITER_OFF_BYTE_RATE]);
-	sys_put_le16(block_align, &header[FILE_WRITER_OFF_BLOCK_ALIGN]);
-	sys_put_le16(FILE_WRITER_BITS_PER_SAMPLE, &header[FILE_WRITER_OFF_BITS]);
-
-	memcpy(&header[FILE_WRITER_OFF_DATA_ID], "data", 4);
-	sys_put_le32(data_bytes, &header[FILE_WRITER_OFF_DATA_SIZE]);
+	return audio_wav_write_header(header, len, &hdr);
 }
 
 /* All or nothing: a filesystem that accepts only part of the buffer is out of
@@ -148,14 +120,23 @@ static int file_writer_write_all(struct audio_file_writer_state *state, const vo
  */
 static int file_writer_finalize(struct audio_file_writer_state *state)
 {
-	uint8_t header[WAV_PARSER_MIN_HEADER_SIZE];
+	uint8_t header[AUDIO_WAV_MIN_HEADER_SIZE];
 	int ret;
 
 	if (!state->file_open || !state->header_stale) {
 		return 0;
 	}
 
-	file_writer_build_header(state, state->data_bytes, header);
+	ret = file_writer_build_header(state, state->data_bytes, header, sizeof(header));
+	if (ret < 0) {
+		/* open() already serialised this very format, so the only way
+		 * here is a payload the size fields cannot describe - which
+		 * process() refuses to produce.
+		 */
+		LOG_ERR("%s: %u payload bytes cannot be described (%d)", state->path,
+			state->data_bytes, ret);
+		return ret;
+	}
 
 	ret = fs_seek(&state->file, 0, FS_SEEK_SET);
 	if (ret < 0) {
@@ -251,7 +232,7 @@ static void file_writer_narrow_s16(const int32_t *samples, size_t count, uint8_t
 
 static int file_writer_open(struct audio_node *node)
 {
-	uint8_t header[WAV_PARSER_MIN_HEADER_SIZE];
+	uint8_t header[AUDIO_WAV_MIN_HEADER_SIZE];
 	struct audio_file_writer_state *state;
 	int ret;
 
@@ -294,6 +275,17 @@ static int file_writer_open(struct audio_node *node)
 		return -ENOTSUP;
 	}
 
+	/* Placeholder sizes: an empty but valid file until the stream ends.
+	 * Serialised before the file is created, so a format the WAV module
+	 * refuses leaves no truncated file behind at all.
+	 */
+	ret = file_writer_build_header(state, 0, header, sizeof(header));
+	if (ret < 0) {
+		LOG_ERR("%s: %u Hz, %u ch is not a writable WAVE format (%d)", state->path,
+			state->fmt.sample_rate_hz, state->fmt.channels, ret);
+		return ret;
+	}
+
 	fs_file_t_init(&state->file);
 
 	/* FS_O_TRUNC: a shorter track must not leave the tail of an older one
@@ -309,9 +301,6 @@ static int file_writer_open(struct audio_node *node)
 	state->file_open = true;
 	state->data_bytes = 0;
 	state->header_stale = false;
-
-	/* Placeholder sizes: an empty but valid file until the stream ends. */
-	file_writer_build_header(state, 0, header);
 
 	ret = file_writer_write_all(state, header, sizeof(header));
 	if (ret < 0) {
@@ -383,7 +372,7 @@ static int file_writer_process(struct audio_node *node, struct audio_buffer_view
 	}
 
 	bytes = produced * FILE_WRITER_BYTES_PER_SAMPLE;
-	if (bytes > (size_t)(UINT32_MAX - FILE_WRITER_RIFF_OVERHEAD) - state->data_bytes) {
+	if (bytes > (size_t)AUDIO_WAV_MAX_DATA_SIZE - state->data_bytes) {
 		/* Both size fields are 32 bit, so this is as much as a WAV file
 		 * can describe.
 		 */

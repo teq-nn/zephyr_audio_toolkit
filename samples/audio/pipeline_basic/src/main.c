@@ -17,7 +17,6 @@
  */
 
 #include <errno.h>
-#include <string.h>
 
 #include <zephyr/fs/fs.h>
 #include <zephyr/kernel.h>
@@ -29,6 +28,7 @@
 #include <zephyr/audio/audio_nodes.h>
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
+#include <zephyr/audio/audio_wav.h>
 
 #define TRACK_MOUNT_POINT "/ram"
 #define TRACK_PATH TRACK_MOUNT_POINT "/track.wav"
@@ -102,33 +102,23 @@ static struct fs_mount_t track_mnt = {
 	.flags = 0,
 };
 
-static void put_wav_header(uint8_t *hdr, uint32_t data_size)
-{
-	uint16_t block_align = TRACK_CHANNELS * (TRACK_BITS_PER_SAMPLE / 8U);
-
-	memcpy(&hdr[0], "RIFF", 4);
-	sys_put_le32(36U + data_size, &hdr[4]);
-	memcpy(&hdr[8], "WAVE", 4);
-
-	memcpy(&hdr[12], "fmt ", 4);
-	sys_put_le32(16U, &hdr[16]);
-	sys_put_le16(1U, &hdr[20]); /* WAVE_FORMAT_PCM */
-	sys_put_le16(TRACK_CHANNELS, &hdr[22]);
-	sys_put_le32(TRACK_SAMPLE_RATE_HZ, &hdr[24]);
-	sys_put_le32(TRACK_SAMPLE_RATE_HZ * block_align, &hdr[28]);
-	sys_put_le16(block_align, &hdr[32]);
-	sys_put_le16(TRACK_BITS_PER_SAMPLE, &hdr[34]);
-
-	memcpy(&hdr[36], "data", 4);
-	sys_put_le32(data_size, &hdr[40]);
-}
-
 static int prepare_track(void)
 {
-	uint8_t hdr[44];
+	uint8_t hdr[AUDIO_WAV_MIN_HEADER_SIZE];
 	uint8_t block[TRACK_CHANNELS * sizeof(int16_t) * 32U];
 	struct fs_file_t file;
 	uint32_t data_size = TRACK_FRAMES * TRACK_CHANNELS * (TRACK_BITS_PER_SAMPLE / 8U);
+	const struct audio_wav_header wav = {
+		.sample_rate_hz = TRACK_SAMPLE_RATE_HZ,
+		/* The whole track is generated below, so its size is known
+		 * before the first byte goes out and the header needs no
+		 * back-patching.
+		 */
+		.data_size = data_size,
+		.format_tag = AUDIO_WAV_FORMAT_PCM,
+		.channels = TRACK_CHANNELS,
+		.bits_per_sample = TRACK_BITS_PER_SAMPLE,
+	};
 	uint32_t frame = 0;
 	ssize_t written;
 	int ret;
@@ -139,7 +129,14 @@ static int prepare_track(void)
 		return ret;
 	}
 
-	put_wav_header(hdr, data_size);
+	/* The header comes from the same module the file reader parses with,
+	 * so a sample application never spells out the RIFF/WAVE layout.
+	 */
+	ret = audio_wav_write_header(hdr, sizeof(hdr), &wav);
+	if (ret < 0) {
+		printk("track: header rejected (%d)\n", ret);
+		return ret;
+	}
 
 	fs_file_t_init(&file);
 

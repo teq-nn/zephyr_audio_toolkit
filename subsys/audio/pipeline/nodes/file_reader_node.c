@@ -23,8 +23,7 @@
 
 #include <zephyr/audio/audio_node.h>
 #include <zephyr/audio/audio_nodes.h>
-
-#include "../util/wav_parser.h"
+#include <zephyr/audio/audio_wav.h>
 
 LOG_MODULE_REGISTER(audio_file_reader, LOG_LEVEL_INF);
 
@@ -98,9 +97,9 @@ static void file_reader_widen_s16(int32_t *buf, size_t samples)
 
 static int file_reader_open(struct audio_node *node)
 {
-	uint8_t header[WAV_PARSER_HEADER_SCAN_SIZE];
+	uint8_t header[AUDIO_WAV_HEADER_SCAN_SIZE];
 	struct audio_file_reader_state *state;
-	struct wav_parser_result wav;
+	struct audio_wav_header wav;
 	ssize_t read;
 	int ret;
 
@@ -137,7 +136,7 @@ static int file_reader_open(struct audio_node *node)
 		goto err_close;
 	}
 
-	ret = wav_parser_read_header(header, (size_t)read, &wav);
+	ret = audio_wav_read_header(header, (size_t)read, &wav);
 	if (ret < 0) {
 		LOG_ERR("%s: not a usable WAVE file (%d)", state->path, ret);
 		goto err_close;

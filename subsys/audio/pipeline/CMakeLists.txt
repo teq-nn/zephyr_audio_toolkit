@@ -7,7 +7,7 @@ zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE
 	audio_pipeline_config.c
 	audio_pipeline_events.c
 	audio_node_core.c
-	util/wav_parser.c
+	audio_wav.c
 	nodes/file_reader_node.c
 	nodes/file_writer_node.c
 	nodes/gain_filter_node.c

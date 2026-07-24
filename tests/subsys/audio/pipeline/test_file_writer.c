@@ -23,14 +23,18 @@
 #include <zephyr/audio/audio_nodes.h>
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
+#include <zephyr/audio/audio_wav.h>
 
 #include "fake_nodes.h"
 #include "wav_fixture.h"
-#include "wav_parser.h"
 
 /* Canonical header: RIFF/WAVE + 16 byte "fmt " + "data" chunk header. */
-#define WRITER_HEADER_SIZE WAV_PARSER_MIN_HEADER_SIZE
-/* Offset of the RIFF size field; the parser reports the data size itself. */
+#define WRITER_HEADER_SIZE AUDIO_WAV_MIN_HEADER_SIZE
+/*
+ * Offset of the RIFF size field. The one field no reader in this subsystem
+ * looks at, so the suite has to reach for it by hand - checking it through the
+ * same module that wrote it would assert nothing.
+ */
 #define WRITER_RIFF_SIZE_OFFSET 4U
 
 /* Defaults the sink applies to a zero-initialised audio_stream_config. */
@@ -123,7 +127,7 @@ static uint8_t file_buf[512];
 static void assert_valid_wav(const char *path, uint32_t rate, uint16_t channels,
 			     uint32_t data_bytes)
 {
-	struct wav_parser_result wav;
+	struct audio_wav_header wav;
 	size_t len = audio_test_read_file(path, file_buf, sizeof(file_buf));
 	uint32_t riff_size;
 	int ret;
@@ -132,10 +136,10 @@ static void assert_valid_wav(const char *path, uint32_t rate, uint16_t channels,
 		      "%s: file is %zu bytes, expected %u", path, len,
 		      WRITER_HEADER_SIZE + data_bytes);
 
-	ret = wav_parser_read_header(file_buf, len, &wav);
+	ret = audio_wav_read_header(file_buf, len, &wav);
 	zassert_equal(ret, 0, "%s: the sink produced a header the parser rejects (%d)", path, ret);
 
-	zassert_equal(wav.format_tag, WAV_PARSER_FORMAT_PCM, "%s: not tagged as PCM", path);
+	zassert_equal(wav.format_tag, AUDIO_WAV_FORMAT_PCM, "%s: not tagged as PCM", path);
 	zassert_equal(wav.sample_rate_hz, rate, "%s: wrong sample rate", path);
 	zassert_equal(wav.channels, channels, "%s: wrong channel count", path);
 	zassert_equal(wav.bits_per_sample, 16U, "%s: v1 writes 16 bit PCM", path);
@@ -493,7 +497,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_reports_write_error_and_leaves_empty
 		.size = 0,
 	};
 	struct audio_file_writer_state *state = abort_writer.state;
-	struct wav_parser_result wav;
+	struct audio_wav_header wav;
 	size_t produced = 0;
 	size_t len;
 	int ret;
@@ -532,7 +536,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_reports_write_error_and_leaves_empty
 	 * length.
 	 */
 	len = audio_test_read_file(AUDIO_TEST_PATH("w_abort.wav"), file_buf, sizeof(file_buf));
-	zassert_equal(wav_parser_read_header(file_buf, len, &wav), 0,
+	zassert_equal(audio_wav_read_header(file_buf, len, &wav), 0,
 		      "even an unfinalised file must carry a parsable header");
 	zassert_equal(wav.data_size, 0U, "an unfinalised file must not claim payload");
 	zassert_equal(sys_get_le32(&file_buf[WRITER_RIFF_SIZE_OFFSET]), 36U,

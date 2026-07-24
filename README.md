@@ -21,12 +21,14 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
 - `CMakeLists.txt` – module root; adds `subsys/audio/pipeline`.
 - `Kconfig` – module root menu; `rsource`s the subsystem Kconfig.
 - `include/zephyr/audio/` – public headers other Zephyr applications include:
-  `audio_format.h`, `audio_node.h`, `audio_nodes.h`, `audio_pipeline.h`, `audio_pipeline_events.h`.
+  `audio_format.h`, `audio_node.h`, `audio_nodes.h`, `audio_pipeline.h`, `audio_pipeline_events.h`,
+  `audio_wav.h` (reads *and* writes RIFF/WAVE headers; the only place that knows the byte layout).
 - `subsys/audio/pipeline/` – the implementation: `audio_pipeline_core.c`, `audio_pipeline_config.c`,
-  `audio_pipeline_events.c`, `audio_node_core.c`, the private `audio_internal.h`, plus
-  `nodes/` (file reader, file writer, gain filter, null sink) and `util/` (WAV parser).
+  `audio_pipeline_events.c`, `audio_node_core.c`, `audio_wav.c`, the private `audio_internal.h`,
+  plus `nodes/` (file reader, file writer, gain filter, null sink).
 - `samples/audio/pipeline_basic/` – reference application (`CMakeLists.txt`, `Kconfig`, `src/main.c`).
 - `tests/subsys/audio/pipeline/` – Ztest suites (`test_roundtrip.c`, `test_error_paths.c`).
+- `tests/subsys/audio/wav/` – standalone WAV header unit test (`test_wav.c`), no pipeline needed.
 
 Headers are installed under the `zephyr/audio/` namespace, so applications include them as
 `#include <zephyr/audio/audio_pipeline.h>`.

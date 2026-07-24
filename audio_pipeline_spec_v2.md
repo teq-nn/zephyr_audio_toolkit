@@ -473,8 +473,10 @@ struct audio_file_reader_state {
 
 Implementation mirrors the reader, in reverse. Two decisions are contract:
 
-- **Header sizes: placeholder, then patch.** `open()` writes a canonical 44-byte
-  header declaring an empty chunk (RIFF size 36, `data` size 0). The real sizes are
+- **Header sizes: placeholder, then patch.** `open()` serialises a canonical
+  44-byte header through the WAV module (§10.3) declaring an empty chunk (RIFF
+  size 36, `data` size 0) *before* it creates the file, so a format the module
+  refuses leaves no truncated file behind. The real sizes are
   patched by seeking to 0, rewriting the header, `fs_sync()`, then seeking back to
   end. This happens on **end of stream as well as in `close()`**, so the file is
   already valid when the pipeline reports EOF — before `join()`. `data_size` counts
@@ -493,6 +495,36 @@ needed. Round-to-nearest is rejected deliberately — the `+0x8000` bias overflo
 `int32_t` just below `INT32_MAX` and pushes full scale out of the int16 range.
 Truncation is also the exact inverse of the reader's `s16 << 16`, which makes the
 roundtrip bit-identical.
+
+### 10.3 WAV header module (shared)
+
+Both file nodes delegate the RIFF/WAVE byte layout to one module,
+`include/zephyr/audio/audio_wav.h` + `subsys/audio/pipeline/audio_wav.c`. It is
+public API, allocation free and filesystem free: it only maps a byte buffer to
+and from a `struct audio_wav_header`.
+
+```c
+int audio_wav_read_header(const uint8_t *data, size_t len, struct audio_wav_header *out);
+int audio_wav_write_header(uint8_t *buf, size_t len, const struct audio_wav_header *hdr);
+```
+
+- **One record, both directions.** `sample_rate_hz`, `data_size`, `format_tag`,
+  `channels` and `bits_per_sample` describe the stream and are read and written;
+  `data_offset` and `block_align` are derived — outputs of a read, ignored by a
+  write.
+- **The reader walks the chunk list**, so `JUNK`/`LIST`/`fact` chunks around
+  `fmt ` and `data` are skipped and a short prefix of the file is enough
+  (`AUDIO_WAV_HEADER_SCAN_SIZE`). The writer emits only the canonical
+  `AUDIO_WAV_MIN_HEADER_SIZE` (44) byte form with no payload.
+- **Both halves share one definition of a usable format**, so the writer can
+  never emit a header the reader rejects: `-EINVAL` for a degenerate `fmt `
+  field, `-EFBIG` for a payload past `AUDIO_WAV_MAX_DATA_SIZE`. The one
+  asymmetry is deliberate — a `format_tag` other than `AUDIO_WAV_FORMAT_PCM` is
+  serialised verbatim and read back as `-ENOTSUP`, which is what lets a test
+  produce a non-PCM file without spelling out field offsets.
+- **Nothing outside this module derives the layout.** The file writer sink
+  supplies the stream description and the module lays out the bytes; the same
+  holds for the reference sample and the test fixture.
 
 ---
 
@@ -577,7 +609,8 @@ zephyr-audio-pipeline/
 │        ├─ audio_node.h
 │        ├─ audio_nodes.h        # per-node state types, ops externs, node DEFINE macros
 │        ├─ audio_pipeline.h
-│        └─ audio_pipeline_events.h
+│        ├─ audio_pipeline_events.h
+│        └─ audio_wav.h          # RIFF/WAVE header: read and write, one byte layout
 ├─ subsys/
 │  └─ audio/
 │     └─ pipeline/
@@ -588,14 +621,12 @@ zephyr-audio-pipeline/
 │        ├─ audio_pipeline_events.c
 │        ├─ audio_node_core.c
 │        ├─ audio_internal.h
-│        ├─ nodes/
-│        │   ├─ file_reader_node.c
-│        │   ├─ file_writer_node.c
-│        │   ├─ gain_filter_node.c
-│        │   └─ null_sink_node.c
-│        └─ util/
-│            ├─ wav_parser.c
-│            └─ wav_parser.h
+│        ├─ audio_wav.c
+│        └─ nodes/
+│            ├─ file_reader_node.c
+│            ├─ file_writer_node.c
+│            ├─ gain_filter_node.c
+│            └─ null_sink_node.c
 ├─ samples/
 │  └─ audio/
 │     └─ pipeline_basic/

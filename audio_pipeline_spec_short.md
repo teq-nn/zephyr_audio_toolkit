@@ -141,13 +141,14 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 ```text
 zephyr-audio-pipeline/
 ├─ module.yml, CMakeLists.txt, Kconfig      # Zephyr out-of-tree module glue
-├─ include/zephyr/audio/                    # audio_format.h, audio_node.h,
-│                                           # audio_pipeline.h, audio_pipeline_events.h
-├─ subsys/audio/pipeline/                   # core, config, events, node core, audio_internal.h
-│  ├─ nodes/                                # file_reader, file_writer, gain_filter, null_sink
-│  └─ util/                                 # wav_parser
+├─ include/zephyr/audio/                    # audio_format.h, audio_node.h, audio_pipeline.h,
+│                                           # audio_pipeline_events.h, audio_wav.h
+├─ subsys/audio/pipeline/                   # core, config, events, node core, audio_internal.h,
+│  │                                        # audio_wav.c (RIFF/WAVE header read + write)
+│  └─ nodes/                                # file_reader, file_writer, gain_filter, null_sink
 ├─ samples/audio/pipeline_basic/            # CMakeLists.txt, Kconfig, src/main.c
-└─ tests/subsys/audio/pipeline/             # test_roundtrip.c, test_error_paths.c
+├─ tests/subsys/audio/pipeline/             # test_roundtrip.c, test_error_paths.c
+└─ tests/subsys/audio/wav/                  # test_wav.c, standalone header unit test
 ```
 
 ## 11. Out of scope for v1 (spec §1.3, §13)

@@ -24,10 +24,10 @@
 #include <zephyr/audio/audio_nodes.h>
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
+#include <zephyr/audio/audio_wav.h>
 
 #include "fake_nodes.h"
 #include "wav_fixture.h"
-#include "wav_parser.h"
 
 #define RT_FRAME_SAMPLES 16
 
@@ -48,7 +48,7 @@
 #define RT_STEREO_FRAMES 45U
 #define RT_SAMPLE_COUNT (RT_STEREO_FRAMES * 2U)
 #define RT_PAYLOAD_BYTES (RT_SAMPLE_COUNT * sizeof(int16_t))
-#define RT_FILE_BYTES (WAV_PARSER_MIN_HEADER_SIZE + RT_PAYLOAD_BYTES)
+#define RT_FILE_BYTES (AUDIO_WAV_MIN_HEADER_SIZE + RT_PAYLOAD_BYTES)
 
 /* file_reader source -> file_writer sink: the plain roundtrip. */
 AUDIO_FILE_READER_NODE_DEFINE(rt_reader, AUDIO_TEST_PATH("rt_golden.wav"));
@@ -171,7 +171,7 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_reproduces_golden_master)
 
 ZTEST(audio_pipeline_roundtrip, test_roundtrip_gain_transforms_samples)
 {
-	struct wav_parser_result wav;
+	struct audio_wav_header wav;
 	size_t golden_len;
 	size_t out_len;
 	size_t i;
@@ -184,7 +184,7 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_gain_transforms_samples)
 
 	/* Same shape as the master: a valid PCM WAV of identical length. */
 	zassert_equal(out_len, golden_len, "half-gain output changed the file length");
-	zassert_equal(wav_parser_read_header(out_buf, out_len, &wav), 0,
+	zassert_equal(audio_wav_read_header(out_buf, out_len, &wav), 0,
 		      "half-gain output is not a parsable WAV");
 	zassert_equal(wav.channels, 2U, "channel count changed");
 	zassert_equal(wav.sample_rate_hz, 48000U, "sample rate changed");
@@ -211,7 +211,7 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_gain_transforms_samples)
 	 * conversion rules, not copied from the gain node.
 	 */
 	for (i = 0; i < RT_SAMPLE_COUNT; i++) {
-		uint16_t got = sys_get_le16(&out_buf[WAV_PARSER_MIN_HEADER_SIZE +
+		uint16_t got = sys_get_le16(&out_buf[AUDIO_WAV_MIN_HEADER_SIZE +
 						     i * sizeof(int16_t)]);
 		uint16_t expect = (uint16_t)(int16_t)(golden_samples[i] >> 1);
 
