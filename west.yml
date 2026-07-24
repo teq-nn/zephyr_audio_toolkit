@@ -1,0 +1,29 @@
+# West manifest used to build this module standalone (CI and local checkouts).
+#
+# It is only consulted when this repository *is* the manifest repository, i.e.
+# after `west init -l <path-to-this-repo>`. When the module is consumed from an
+# application workspace, that workspace's own manifest wins and this file is
+# ignored.
+#
+# The Zephyr revision below is pinned on purpose: CI must be reproducible.
+# Bump it deliberately, in its own commit.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.4.1
+      import:
+        # Only clone the modules this module actually needs. The default
+        # test target (native_sim) needs no HAL; picolibc is kept so the
+        # C library choice does not depend on what the toolchain ships.
+        # Add entries here when tests start covering another board
+        # (e.g. cmsis_6 + hal_nordic for the nRF53 audio targets).
+        name-allowlist:
+          - picolibc

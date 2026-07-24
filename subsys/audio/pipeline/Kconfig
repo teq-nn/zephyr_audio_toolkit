@@ -1,7 +1,14 @@
 menuconfig AUDIO_PIPELINE
 	bool "Zephyr audio pipeline"
+	select FILE_SYSTEM
 	help
 	  Enable the pull-based audio pipeline subsystem and helper nodes.
+
+	  The file reader source and the file writer sink shipped with the
+	  subsystem talk to the Zephyr filesystem API, so FILE_SYSTEM is
+	  selected unconditionally. That only pulls in the dispatch layer -
+	  the application still chooses a filesystem type (ext2, FAT,
+	  littlefs, ...) and mounts it before opening the pipeline.
 
 if AUDIO_PIPELINE
 
@@ -11,6 +18,17 @@ config AUDIO_PIPELINE_FRAME_SAMPLES
 	range 1 1024
 	help
 	  Frame size processed by the pipeline thread in one iteration.
+
+config AUDIO_PIPELINE_EVENT_QUEUE_DEPTH
+	int "Event queue depth per pipeline"
+	default 4
+	range 1 32
+	help
+	  Number of audio_pipeline_event entries the per-pipeline message queue
+	  can hold. The storage is allocated statically, either by
+	  AUDIO_PIPELINE_DEFINE() or - for a zero-initialised instance - by the
+	  subsystem itself. When the queue is full the newest event is dropped,
+	  so the oldest ones (and with them the first error) always survive.
 
 config AUDIO_PIPELINE_THREAD_PRIO
 	int "Pipeline thread priority"

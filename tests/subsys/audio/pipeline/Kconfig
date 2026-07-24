@@ -3,3 +3,11 @@ config TEST_AUDIO_PIPELINE
 	default y
 	help
 	  Build the unit tests for the audio pipeline subsystem.
+
+# The subsystem's own Kconfig symbols arrive through the module glue that
+# Kconfig.zephyr pulls in - do not rsource them here as well, or every symbol
+# gets defined twice.
+#
+# A test application supplies the Kconfig root, so the rest of the tree has to
+# be sourced explicitly.
+source "Kconfig.zephyr"

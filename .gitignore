@@ -1,0 +1,8 @@
+# Zephyr / west build output
+build/
+build-*/
+twister-out/
+twister-out.*/
+
+# west workspace metadata (only present when this repo is the manifest repo)
+.west/

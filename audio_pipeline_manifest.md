@@ -93,7 +93,13 @@ It acts as the binding engineering contract for ongoing development.
   - `AUDIO_PIPELINE_EVENT_EOF`
   - `AUDIO_PIPELINE_EVENT_ERROR`
   - `AUDIO_PIPELINE_EVENT_RECONFIG`
-- Events are exposed via an internal `k_msgq` or optionally via callback.
+- Events are exposed via a per-pipeline `k_msgq`, read with `audio_pipeline_get_event()`.
+  The queue is the primary path; the optional `event_cb` callback is a secondary one.
+- Resolved delivery contract: the callback is invoked **before** the event is queued, so an
+  event becoming visible on the queue means the pipeline has finished reacting to it — chain
+  quiesced and callback returned. Depth is `CONFIG_AUDIO_PIPELINE_EVENT_QUEUE_DEPTH`; on
+  overflow the **newest** event is dropped, so the worker thread never stalls on a slow
+  consumer and the first error in a cascade is preserved.
 
 ---
 
@@ -136,12 +142,13 @@ The implementation follows the layout defined in the specification:
 
 ```
 zephyr-audio-pipeline/
-├─ module.yml
+├─ zephyr/module.yml      # module manifest; Zephyr only looks here
 ├─ CMakeLists.txt
 ├─ Kconfig
 ├─ include/zephyr/audio/
 │  ├─ audio_format.h
 │  ├─ audio_node.h
+│  ├─ audio_nodes.h        # per-node state types, ops externs, node DEFINE macros
 │  ├─ audio_pipeline.h
 │  └─ audio_pipeline_events.h
 ├─ subsys/audio/pipeline/
@@ -163,11 +170,28 @@ zephyr-audio-pipeline/
 ├─ samples/audio/pipeline_basic/
 │  ├─ CMakeLists.txt
 │  ├─ Kconfig
+│  ├─ prj.conf
+│  ├─ app.overlay            # zephyr,ram-disk for the generated track
 │  └─ src/main.c
-└─ tests/subsys/audio/pipeline/
-   ├─ CMakeLists.txt
-   ├─ Kconfig
-   ├─ test_roundtrip.c
-   └─ test_error_paths.c
+└─ tests/subsys/audio/
+   ├─ pipeline/
+   │  ├─ CMakeLists.txt
+   │  ├─ app.overlay         # zephyr,ram-disk backing the ext2 fixture mount
+   │  ├─ wav_fixture.h       # shared fixture: mount, raw writer, WAV generator
+   │  ├─ wav_fixture.c
+   │  ├─ Kconfig
+   │  ├─ prj.conf
+   │  ├─ testcase.yaml
+   │  ├─ test_roundtrip.c
+   │  ├─ test_error_paths.c
+   │  ├─ test_lifecycle.c        # spec §8.2/§9 lifecycle
+   │  ├─ test_static_define.c    # DEFINE macros, multi-instance isolation
+   │  ├─ test_events.c           # k_msgq event queue
+   │  └─ test_file_reader.c      # WAV source, S16→S32 widening
+   └─ wav_parser/                # standalone unit test, no CONFIG_AUDIO_PIPELINE
+      ├─ CMakeLists.txt
+      ├─ prj.conf
+      ├─ testcase.yaml
+      └─ test_wav_parser.c
 ```
 This document is our shared engineering contract.

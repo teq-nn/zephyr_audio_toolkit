@@ -1,23 +1,69 @@
 # Zephyr Audio Toolkit Module
 
-This repository houses an out-of-tree module that plugs into Zephyr builds, providing reusable audio pipeline components. Architectural intent lives alongside the code so the module can evolve without drifting from the authored contract.
+This repository houses an out-of-tree Zephyr module (`zephyr-audio-pipeline`) that provides a
+pull-based audio pipeline subsystem: sources, filters, and sinks chained behind a single worker
+thread, with static memory only. Architectural intent lives alongside the code so the module can
+evolve without drifting from the authored contract.
+
+New here? Read `audio_pipeline_spec_short.md` first — it is the one-page digest of the contract.
 
 ## Layout
 
-- `audio_pipeline_manifest.md`, `audio_pipeline_spec_v2.md`, `audio_pipeline_spec_short.md` – canonical design docs; update the manifest first when changing thread, buffer, or role semantics, then mirror API edits in the spec and digest.
-- `zephyr/` – integration glue for Zephyr (e.g., `module.yml`, Kconfig fragments, top-level `CMakeLists.txt`).
-- `src/` – Zephyr sources for pipeline nodes, helpers, and runtime glue.
-- `include/audio_pipeline/` – public headers that other Zephyr applications ingest.
-- `tests/` – Twister scenarios plus fixtures; follow the `test_<role>_<behavior>` naming convention.
-- `samples/` – reference applications or smoke tests runnable with `west build` and `west flash`.
-- `doc/` – supplementary documentation beyond the manifest/spec trio.
+The tree follows the layout prescribed by manifest §12 and spec §14.
+
+- `audio_pipeline_manifest.md` – the architectural contract; update it first when changing thread,
+  buffer, or role semantics.
+- `audio_pipeline_spec_v2.md` – the implementation blueprint (API shapes, Kconfig, EOF/error rules).
+- `audio_pipeline_spec_short.md` – the onboarding digest of the two documents above; refresh it
+  whenever the manifest or spec changes materially.
+- `AGENTS.md` – contributor and agent guidelines (structure, style, testing, review).
+- `zephyr/module.yml` – Zephyr module metadata; points the build at the root `CMakeLists.txt` and `Kconfig`. Zephyr only discovers modules via `zephyr/module.{yml,yaml}`, so this path is not optional.
+- `CMakeLists.txt` – module root; adds `subsys/audio/pipeline`.
+- `Kconfig` – module root menu; `rsource`s the subsystem Kconfig.
+- `include/zephyr/audio/` – public headers other Zephyr applications include:
+  `audio_format.h`, `audio_node.h`, `audio_nodes.h`, `audio_pipeline.h`, `audio_pipeline_events.h`.
+- `subsys/audio/pipeline/` – the implementation: `audio_pipeline_core.c`, `audio_pipeline_config.c`,
+  `audio_pipeline_events.c`, `audio_node_core.c`, the private `audio_internal.h`, plus
+  `nodes/` (file reader, file writer, gain filter, null sink) and `util/` (WAV parser).
+- `samples/audio/pipeline_basic/` – reference application (`CMakeLists.txt`, `Kconfig`, `src/main.c`).
+- `tests/subsys/audio/pipeline/` – Ztest suites (`test_roundtrip.c`, `test_error_paths.c`).
+
+Headers are installed under the `zephyr/audio/` namespace, so applications include them as
+`#include <zephyr/audio/audio_pipeline.h>`.
+
+## Using the module
+
+The repository is a Zephyr module, not a standalone application. Make it visible to your workspace
+in one of two ways:
+
+- Add it to your west manifest (`west.yml`) as a project, so `west` registers it automatically, or
+- Point the build at it explicitly: `-DZEPHYR_EXTRA_MODULES=<abs path to this repo>`.
+
+Then enable it with `CONFIG_AUDIO_PIPELINE=y` in your application's `prj.conf`.
 
 ## Build & Test
 
-Common commands once sources land:
+Commands below assume you are at the repository root inside an initialised west workspace.
 
-- `west build -b nrf5340_audio src` – build the module against Zephyr (swap `-b` per target).
-- `west flash` – deploy onto hardware after host-based validation.
-- `west twister -T tests` – run headless test suites; add `-p <BOARD>` for driver-backed coverage.
+```sh
+# Build the sample for the host simulator
+west build -b native_sim -d build/sample samples/audio/pipeline_basic \
+    -- -DZEPHYR_EXTRA_MODULES=$PWD
 
-Follow Zephyr’s K&R style (tabs, snake_case, braces on same line) and run `checkpatch.pl --strict` and `clang-format -style=file` before submitting patches that touch code. Keep specs, manifest, and docs synchronized with any code changes.
+# Same sample on hardware, then flash it
+west build -b nrf5340_audio_dk/nrf5340/cpuapp -d build/hw samples/audio/pipeline_basic \
+    -- -DZEPHYR_EXTRA_MODULES=$PWD
+west flash -d build/hw
+
+# Run the test suites headlessly
+west twister -T tests -p native_sim -x=ZEPHYR_EXTRA_MODULES=$PWD
+```
+
+If the module is registered in the west manifest, the `-DZEPHYR_EXTRA_MODULES` / `-x` arguments can
+be dropped. Swap `-p native_sim` for `-p <BOARD>` when coverage must include driver-backed sinks.
+
+## Contributing
+
+Follow Zephyr's K&R style (tabs, snake_case, braces on the same line) and run `checkpatch.pl
+--strict` before submitting patches that touch code. Keep the manifest, spec, and digest
+synchronized with any code change — see `AGENTS.md` for the full guidelines.

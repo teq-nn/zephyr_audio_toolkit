@@ -1,0 +1,105 @@
+# Builds this module against a pinned Zephyr and runs the Ztest suites with
+# Twister on native_sim.
+#
+# Actions minutes are a scarce resource on this repository, so the triggers are
+# deliberately narrow:
+#   * manual runs are always available ("Run workflow"),
+#   * automatic runs only happen when files that can actually affect the build
+#     change (see `paths:` below) - documentation-only pushes and PRs are free,
+#   * draft pull requests do not run; mark the PR ready or dispatch manually,
+#   * superseded runs are cancelled instead of finishing.
+#
+# The payload is scripts/ci-test.sh, which a developer can run byte-identically
+# on their own machine. Keep it that way: no test flags in this file.
+
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Board target passed to twister -p
+        required: false
+        default: native_sim
+  push:
+    branches:
+      - main
+    # Keep this list in sync with the pull_request one below (GitHub Actions
+    # does not support YAML anchors).
+    paths:
+      - 'include/**'
+      - 'subsys/**'
+      - 'tests/**'
+      - 'samples/**'
+      - 'scripts/**'
+      - 'CMakeLists.txt'
+      - 'Kconfig'
+      - 'zephyr/module.yml'
+      - 'west.yml'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'include/**'
+      - 'subsys/**'
+      - 'tests/**'
+      - 'samples/**'
+      - 'scripts/**'
+      - 'CMakeLists.txt'
+      - 'Kconfig'
+      - 'zephyr/module.yml'
+      - 'west.yml'
+      - '.github/workflows/ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  twister:
+    name: twister (native_sim)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    env:
+      # Empty for non-dispatch events; ci-test.sh falls back to native_sim.
+      CI_TEST_PLATFORM: ${{ inputs.platform }}
+    steps:
+      - name: Check out the module
+        uses: actions/checkout@v7
+        with:
+          # Becomes the west manifest repository; Zephyr is cloned alongside it.
+          path: zephyr_audio_toolkit
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Set up Zephyr workspace and SDK
+        uses: zephyrproject-rtos/action-zephyr-setup@v1.0.14
+        with:
+          # Reads zephyr_audio_toolkit/west.yml, which pins the Zephyr revision.
+          app-path: zephyr_audio_toolkit
+          # native_sim links against the host libc and builds with the host
+          # gcc; x86_64-zephyr-elf is only kept so QEMU x86 targets can be
+          # added later without a cold-cache surprise.
+          toolchains: x86_64-zephyr-elf
+
+      - name: Run Twister suites
+        working-directory: zephyr_audio_toolkit
+        run: ./scripts/ci-test.sh
+
+      - name: Upload Twister results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: twister-out
+          path: |
+            zephyr_audio_toolkit/twister-out/twister.log
+            zephyr_audio_toolkit/twister-out/twister.xml
+            zephyr_audio_toolkit/twister-out/**/handler.log
+          if-no-files-found: ignore
+          retention-days: 7

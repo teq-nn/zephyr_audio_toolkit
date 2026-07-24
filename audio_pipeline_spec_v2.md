@@ -258,7 +258,13 @@ struct audio_pipeline {
     int32_t *frame_buffer;
     size_t frame_capacity; /* in samples */
 
-    struct k_msgq *event_queue;
+    /* Event queue is embedded, not a pointer to an external msgq: the
+     * AUDIO_PIPELINE_DEFINE macro owns the slot storage so that two
+     * macro-defined pipelines cannot share one queue. Zero-initialised
+     * instances fall back to built-in slots in audio_pipeline_init(). */
+    struct k_msgq event_msgq;
+    struct audio_pipeline_event *event_slots;
+    size_t event_slot_count;
 
     bool initialized;
     bool running;
@@ -273,8 +279,8 @@ The pipeline is defined statically via a macro, e.g.:
 ```c
 AUDIO_PIPELINE_DEFINE(my_pipeline,
     .frame_samples = CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES,
-    .stack_size    = CONFIG_AUDIO_PIPELINE_STACK_SIZE,
-    .priority      = CONFIG_AUDIO_PIPELINE_PRIORITY);
+    .stack_size    = CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE,
+    .priority      = CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
 ```
 
 The macro:
@@ -302,13 +308,18 @@ config AUDIO_PIPELINE_FRAME_SAMPLES
     default 64
     range 8 1024
 
-config AUDIO_PIPELINE_STACK_SIZE
+config AUDIO_PIPELINE_THREAD_STACK_SIZE
     int "Stack size for pipeline worker thread"
     default 2048
 
-config AUDIO_PIPELINE_PRIORITY
+config AUDIO_PIPELINE_THREAD_PRIO
     int "Priority of pipeline worker thread"
     default 5
+
+config AUDIO_PIPELINE_EVENT_QUEUE_DEPTH
+    int "Number of events buffered per pipeline"
+    default 4
+    range 1 32
 ```
 
 ---
@@ -377,7 +388,7 @@ enum audio_pipeline_event_type {
 
 struct audio_pipeline_event {
     enum audio_pipeline_event_type type;
-    int error; /* optional: error code for ERROR */
+    int err; /* optional: error code for ERROR */
 };
 ```
 
@@ -429,12 +440,14 @@ Behavior:
 - Context struct (example):
 
 ```c
-struct file_reader_context {
+/* Implemented as struct audio_file_reader_state in
+ * include/zephyr/audio/audio_nodes.h - the sketch below predates it. */
+struct audio_file_reader_state {
+    const char *path;       /* set by AUDIO_FILE_READER_NODE_DEFINE */
     struct fs_file_t file;
     struct audio_format fmt;
-    uint32_t data_offset;
-    uint32_t data_size;
-    uint32_t bytes_read;
+    size_t bytes_left;      /* remaining declared payload */
+    bool file_open;
     bool eof;
 };
 ```
@@ -473,8 +486,9 @@ Implementation mirrors the reader, in reverse.
 
 - `AUDIO_PIPELINE_DEFINE(name, ...)`  
   - allocates pipeline + thread stack + frame buffer.
-- `FILE_READER_NODE_DEFINE(name, path)`  
-  - statically allocates `struct audio_node` and `struct file_reader_context`.
+- `AUDIO_FILE_READER_NODE_DEFINE(name, path)`  
+  - statically allocates `struct audio_node` and `struct audio_file_reader_state`.
+  - Macros carry the `AUDIO_` prefix per AGENTS.md; see `audio_nodes.h` for the full set.
 
 Concrete macros can be refined during implementation but must honor this principle.
 
@@ -532,7 +546,7 @@ Test steps:
 ```
 
 zephyr-audio-pipeline/
-├─ module.yml
+├─ zephyr/module.yml      # module manifest; Zephyr only looks here
 ├─ CMakeLists.txt
 ├─ Kconfig
 ├─ include/
@@ -540,6 +554,7 @@ zephyr-audio-pipeline/
 │     └─ audio/
 │        ├─ audio_format.h
 │        ├─ audio_node.h
+│        ├─ audio_nodes.h        # per-node state types, ops externs, node DEFINE macros
 │        ├─ audio_pipeline.h
 │        └─ audio_pipeline_events.h
 ├─ subsys/

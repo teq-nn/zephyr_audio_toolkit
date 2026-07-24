@@ -3,3 +3,7 @@ config SAMPLE_AUDIO_PIPELINE_BASIC
 	default y
 	help
 	  Enable the basic sample showcasing the audio pipeline skeleton.
+
+# A sample application supplies the Kconfig root, so the rest of the tree has to
+# be sourced explicitly.
+source "Kconfig.zephyr"

@@ -1,20 +1,19 @@
 #include <errno.h>
-#include <zephyr/audio/audio_node.h>
+#include <zephyr/sys/util.h>
 
-struct gain_filter_state {
-	int32_t gain_q15;
-};
+#include <zephyr/audio/audio_node.h>
+#include <zephyr/audio/audio_nodes.h>
 
 static int gain_filter_open(struct audio_node *node)
 {
-	struct gain_filter_state *state = (struct gain_filter_state *)node->state;
+	struct audio_gain_filter_state *state = (struct audio_gain_filter_state *)node->state;
 
 	if (!state) {
 		return -EINVAL;
 	}
 
 	if (state->gain_q15 == 0) {
-		state->gain_q15 = 32768;
+		state->gain_q15 = AUDIO_GAIN_UNITY_Q15;
 	}
 
 	return 0;
@@ -23,7 +22,7 @@ static int gain_filter_open(struct audio_node *node)
 static int gain_filter_process(struct audio_node *node, struct audio_buffer_view *buf,
 			       size_t *out_size)
 {
-	struct gain_filter_state *state = (struct gain_filter_state *)node->state;
+	struct audio_gain_filter_state *state = (struct audio_gain_filter_state *)node->state;
 	size_t i;
 	int ret;
 

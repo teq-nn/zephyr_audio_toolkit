@@ -1,5 +1,8 @@
 #include <errno.h>
+#include <zephyr/sys/util.h>
+
 #include <zephyr/audio/audio_node.h>
+#include <zephyr/audio/audio_nodes.h>
 
 static int file_writer_open(struct audio_node *node)
 {

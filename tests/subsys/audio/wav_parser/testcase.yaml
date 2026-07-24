@@ -1,0 +1,8 @@
+tests:
+  audio.pipeline.wav_parser:
+    tags:
+      - audio
+      - audio_pipeline
+      - wav
+    integration_platforms:
+      - native_sim

@@ -1,0 +1,7 @@
+tests:
+  audio.pipeline.core:
+    tags:
+      - audio
+      - audio_pipeline
+    integration_platforms:
+      - native_sim
