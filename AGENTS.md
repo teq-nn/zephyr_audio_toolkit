@@ -25,3 +25,17 @@
 - Prefer single-purpose commits with imperative summaries (`Add sink EOF callback`). Wrap bodies at 72 chars and reference Zephyr issues using `Fixes ZEPHYR-####` when applicable.
 - PRs must link to the updated spec section, describe validation steps (`west build`, `west twister`), and include logs or screenshots when hardware output mattered.
 - Request review from both architecture and platform maintainers; manifest/spec edits require dual approval to keep the contract synchronized.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live as GitHub issues in `teq-nn/zephyr_audio_toolkit`, managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, each label string equal to its name. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
