@@ -205,13 +205,51 @@ static struct audio_pipeline_event default_event_slots[AUDIO_PIPELINE_EVENT_QUEU
  *
  * An owner is only ever compared, never dereferenced, so an instance discarded
  * without audio_pipeline_join() leaves a stale identity rather than a dangling
- * read - but it also never gives its built-ins back. Joining before discarding
- * is part of the contract (see audio_pipeline.h).
+ * read. Two consequences are accepted rather than fixed, because both would
+ * need the owner to be inspected - which is exactly what must not happen to a
+ * pointer that may name an object that is gone (issue #20):
+ *
+ *  - An instance that is initialised and then abandoned holds its built-ins for
+ *    the lifetime of the process, so every later hand-rolled instance gets
+ *    -EBUSY. Joining before discarding is part of the contract (see
+ *    audio_pipeline.h); there is no deinit, and reclaiming from a "dead" owner
+ *    would mean asking that owner whether it is still alive.
+ *  - Ownership is by pointer identity, so a new instance in the storage of a
+ *    discarded one inherits its claim. It cannot corrupt anything: the
+ *    inheriting instance re-initialises the ring and refreshes the epoch below
+ *    on its own init(), and the instance it inherits from no longer exists.
+ *
+ * Neither is a corruption path; both are lockout/identity effects, and the
+ * cheapest cure for the first one is the caller's own join().
  */
 static struct audio_pipeline *default_stack_owner;
 static struct audio_pipeline *default_frame_buf_owner;
 static struct audio_pipeline *default_event_slots_owner;
 static struct k_spinlock default_owner_lock;
+
+/*
+ * How often the built-in event slots have changed hands, which is what tells a
+ * stale k_msgq binding from a live one (issue #20).
+ *
+ * Releasing the slots does not invalidate the binding of the instance that
+ * released them - the ring still holds that instance's own events, which is why
+ * the ERROR event audio_pipeline_join() publishes on a failing close() stays
+ * readable. Handing them to *another* instance does: that instance calls
+ * k_msgq_init() on the same storage, so head, tail and used_msgs are reset
+ * behind the back of every other control block pointing at it. From that moment
+ * the previous binding describes a ring that has moved on, and reading through
+ * it would consume the new owner's events.
+ *
+ * Counted rather than derived from the owner pointer because "free again" is
+ * not the same as "untouched": an instance may claim, run and release the slots
+ * while the previous binding still exists.
+ *
+ * Written under default_owner_lock; audio_pipeline.event_slots_epoch carries
+ * the value an instance was given when it claimed. Zero is no valid epoch - the
+ * first claim bumps this to 1 - so a zero-initialised instance never looks
+ * current by accident.
+ */
+static uint32_t default_event_slots_epoch;
 
 /* True while @p owner is free or already @p pipeline's: re-claiming what an
  * instance holds has to succeed, otherwise start() could not follow init().
@@ -260,7 +298,15 @@ static int pipeline_claim_defaults(struct audio_pipeline *pipeline)
 	}
 
 	if (wants_event_slots) {
+		if (default_event_slots_owner != pipeline) {
+			/* The slots change hands, so every binding to them that
+			 * is not this one is stale from here on.
+			 */
+			default_event_slots_epoch++;
+		}
+
 		default_event_slots_owner = pipeline;
+		pipeline->event_slots_epoch = default_event_slots_epoch;
 	}
 
 	k_spin_unlock(&default_owner_lock, key);
@@ -290,10 +336,35 @@ static int pipeline_claim_defaults(struct audio_pipeline *pipeline)
 	return 0;
 }
 
+bool audio_pipeline_event_queue_is_current(const struct audio_pipeline *pipeline)
+{
+	k_spinlock_key_t key;
+	bool current;
+
+	if (pipeline->event_slots != default_event_slots) {
+		/* Caller-owned storage (AUDIO_PIPELINE_DEFINE) or nothing bound
+		 * yet: no other instance can ever take it, so the binding holds
+		 * for the life of the instance.
+		 */
+		return true;
+	}
+
+	key = k_spin_lock(&default_owner_lock);
+	current = (pipeline->event_slots_epoch == default_event_slots_epoch);
+	k_spin_unlock(&default_owner_lock, key);
+
+	return current;
+}
+
 /*
  * Give back whichever built-ins @p pipeline holds, so the next hand-rolled
  * instance can have them. The instance keeps pointing at them - a joined
  * pipeline is restartable - which is why audio_pipeline_start() claims again.
+ *
+ * The event slot epoch is deliberately not bumped here: until another instance
+ * claims them, the ring still holds nothing but this instance's own events, and
+ * draining them after audio_pipeline_join() - including the ERROR event a
+ * failing close() just published - stays legal.
  */
 static void pipeline_release_defaults(struct audio_pipeline *pipeline)
 {
@@ -552,6 +623,7 @@ int audio_pipeline_set_format(struct audio_pipeline *pipeline,
 int audio_pipeline_start(struct audio_pipeline *pipeline)
 {
 	enum audio_pipeline_state state;
+	bool event_queue_current;
 	bool create_thread;
 	int ret;
 
@@ -578,6 +650,13 @@ int audio_pipeline_start(struct audio_pipeline *pipeline)
 		return -ENODATA;
 	}
 
+	/* Read before the claim below refreshes the answer: it says whether the
+	 * event queue this instance carries still describes the storage it
+	 * points at, or whether another instance held the built-in slots in the
+	 * meantime and reset the ring through its own control block.
+	 */
+	event_queue_current = audio_pipeline_event_queue_is_current(pipeline);
+
 	/* An instance that was joined gave its built-ins back, so take them again
 	 * before touching them. Deliberately no ERROR event on the refusal: the
 	 * event queue is one of the resources this pipeline no longer owns, and
@@ -586,6 +665,18 @@ int audio_pipeline_start(struct audio_pipeline *pipeline)
 	ret = pipeline_claim_defaults(pipeline);
 	if (ret < 0) {
 		return ret;
+	}
+
+	if (!event_queue_current) {
+		/* The queue is bound in init(), not here, so a restart across
+		 * another owner's life has to rebind rather than assume the old
+		 * binding is still good (issue #20). Done as early as this - the
+		 * first thing after the slots are ours again - so nothing can
+		 * publish through the stale binding, and it purges the events the
+		 * intervening owner left in the storage, which are not ours to
+		 * deliver.
+		 */
+		audio_pipeline_event_queue_init(pipeline);
 	}
 
 	if (pipeline_state_has_open_chain(state)) {

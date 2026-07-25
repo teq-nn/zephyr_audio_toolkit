@@ -401,16 +401,41 @@ Because there is only one of each, they are **claimed**, not shared:
 Two pipelines that must run concurrently therefore need `AUDIO_PIPELINE_DEFINE()` (or caller-owned
 storage) for at least one of them; that path allocates per instance and never touches the built-ins.
 
-Two obligations fall on the caller, because the guard covers the entry points that *take* the
-resources, not every use of them:
+The window between a `join()` and the next successful `init()`/`start()` — the instance still
+points at the built-ins but owns none of them — is where the read path needs its own rule, because
+`audio_pipeline_get_event()` is reachable at any time and from any thread while
+`audio_pipeline_process_frame()` and the publish path are not:
+
+- The event slots carry a **claim epoch**, bumped whenever they change hands. An instance records
+  the epoch it was given when it claimed them, and `audio_pipeline_get_event()` refuses with
+  `-EPERM` once the two differ. Ownership alone would be the wrong test: releasing the slots does
+  not invalidate the binding, and the events already queued — including the ERROR event `join()`
+  publishes for a failing `close()` — stay readable until another instance claims them. It is that
+  claim which calls `k_msgq_init()` on the same ring and resets head, tail and `used_msgs` behind
+  the previous control block's back.
+- `audio_pipeline_start()` therefore **rebinds** the queue when the epoch moved on while the
+  instance was joined, rather than assuming the binding `init()` made is still good. A restarted
+  instance starts from an empty queue instead of inheriting the intervening owner's leftovers.
+- An instance with its own event slots (`AUDIO_PIPELINE_DEFINE()`) is never affected; nothing else
+  can reach that storage.
+
+Two obligations remain with the caller, because the guard covers the entry points that *take* the
+resources plus the event read, not every use of them:
 
 - An instance running on the built-ins must be joined before it is discarded. `join()` is the only
   release; there is no deinit, and an instance that is initialised and then abandoned holds them
-  for the lifetime of the process.
-- Between a `join()` and the next successful `init()`/`start()` the instance still points at the
-  built-ins but owns none of them. `audio_pipeline_process_frame()` and
-  `audio_pipeline_get_event()` must not be called in that window — they would read and write the
-  new owner's frame buffer and event ring.
+  for the lifetime of the process, locking every later hand-rolled instance out with `-EBUSY`.
+  Accepted rather than fixed: reclaiming from an abandoned instance would mean dereferencing an
+  owner pointer that may name an object that is gone.
+- `audio_pipeline_process_frame()` must not be called between a `join()` and the next successful
+  `init()`/`start()` — it would read and write the new owner's frame buffer. Unlike the event
+  queue, the frame buffer has no reader outside the pipeline's own thread, so the rule stays a
+  contract instead of a check on every frame.
+
+Ownership is by pointer identity, so an instance placed in the storage of a discarded one inherits
+its claim. That is an identity effect, not a corruption path: the inheriting instance re-initialises
+the ring and refreshes the epoch in its own `init()`, and the instance it inherits from no longer
+exists.
 
 ### 6.2 Static definition
 
@@ -620,6 +645,11 @@ Behavior:
 
 - EOF: As soon as a sink receives `out_size == 0`, an `AUDIO_PIPELINE_EVENT_EOF` is generated.
 - ERROR: If any node returns < 0 from `process()` or `open()`/`close()`, the pipeline generates `AUDIO_PIPELINE_EVENT_ERROR` and sets `evt.error` accordingly.
+- After `audio_pipeline_join()`: an instance with its own event slots reads on unchanged, and one
+  running on the built-in slots keeps delivering what is already queued until another instance
+  claims those slots. From that point `audio_pipeline_get_event()` returns `-EPERM` and touches the
+  storage no further (§6.1); a later `audio_pipeline_start()` rebinds the queue and the instance
+  reads on from empty. `-EINVAL` still covers a NULL argument and an uninitialised instance.
 
 ---
 

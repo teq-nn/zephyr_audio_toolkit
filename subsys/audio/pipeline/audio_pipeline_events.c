@@ -72,5 +72,28 @@ int audio_pipeline_get_event(struct audio_pipeline *pipeline,
 		return -EINVAL;
 	}
 
+	/*
+	 * "Initialised" is not enough to make the read safe (issue #20). This
+	 * call is reachable at any time and from any thread, while the built-in
+	 * event slots an instance runs on are released by audio_pipeline_join()
+	 * and handed to the next hand-rolled instance - which re-initialises the
+	 * same ring through a control block of its own. Reading through the old
+	 * binding after that would not find an empty queue: it would consume the
+	 * new owner's events and drive two sets of head/tail pointers over one
+	 * ring buffer.
+	 *
+	 * Refusing is the read-path counterpart of audio_pipeline_start()
+	 * skipping its ERROR event when the claim is refused, and it is
+	 * deliberately narrower than "has been joined": until another instance
+	 * claims the slots the ring still holds this instance's own events, so
+	 * draining after a join - the ERROR event of a failing close() included
+	 * - keeps working.
+	 */
+	if (!audio_pipeline_event_queue_is_current(pipeline)) {
+		LOG_ERR("the event queue this pipeline points at belongs to another instance; "
+			"drain it before audio_pipeline_join() or restart the pipeline");
+		return -EPERM;
+	}
+
 	return k_msgq_get(&pipeline->event_msgq, event, timeout);
 }

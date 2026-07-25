@@ -86,4 +86,19 @@ void audio_pipeline_publish_event(struct audio_pipeline *pipeline,
  */
 void audio_pipeline_event_queue_init(struct audio_pipeline *pipeline);
 
+/*
+ * True while @p pipeline's k_msgq still describes the storage it points at.
+ *
+ * Always true for an instance that brought its own event slots: nothing else
+ * can reach them. For one running on the built-in slots it holds until another
+ * instance claims those slots, because that instance re-initialises the same
+ * ring through a control block of its own - after which reading through the old
+ * binding would consume the new owner's events instead of finding an empty
+ * queue (issue #20).
+ *
+ * Ownership alone is not the question: an instance that has been joined still
+ * has a good binding, and only the next claimant invalidates it.
+ */
+bool audio_pipeline_event_queue_is_current(const struct audio_pipeline *pipeline);
+
 #endif /* ZEPHYR_AUDIO_INTERNAL_H_ */

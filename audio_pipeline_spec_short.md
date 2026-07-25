@@ -124,7 +124,11 @@ struct audio_stream_config {
   gives a second claimant `-EBUSY`, `join()` releases them, `start()` reclaims them (also `-EBUSY`
   if they were taken meanwhile). Need two pipelines at once? Use `AUDIO_PIPELINE_DEFINE()` for at
   least one of them. Join such an instance before discarding it — that is the only release — and do
-  not pull frames or read events on it between the join and the next successful init/start.
+  not pull frames on it between the join and the next successful init/start.
+- Reading events in that window is guarded rather than forbidden: what is already queued stays
+  readable after `join()`, `audio_pipeline_get_event()` switches to `-EPERM` once another instance
+  claims the built-in slots, and `start()` rebinds the queue so a restarted instance never inherits
+  the other one's events (spec §6.1/§8.3).
 
 ## 6. Lifecycle and API (spec §8)
 

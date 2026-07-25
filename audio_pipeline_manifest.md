@@ -134,6 +134,11 @@ It acts as the binding engineering contract for ongoing development.
   subsystem's single built-in set for a zero-initialised instance. The built-in set follows the
   claim/release rule of §6, so two instances can never publish into one ring: the second one is
   refused at `init()`/`start()` rather than interleaving its events with the first one's.
+- The same rule governs *reading* a released ring. After `join()` an instance keeps delivering the
+  events already queued — nothing else has written to them yet — but once the built-in slots are
+  claimed by someone else, `audio_pipeline_get_event()` reports `-EPERM` instead of consuming the
+  new owner's events, and a restart rebinds the queue rather than reusing a binding that has gone
+  stale.
 - Resolved delivery contract: the callback is invoked **before** the event is queued, so an
   event becoming visible on the queue means the pipeline has finished reacting to it — chain
   quiesced and callback returned. Depth is `CONFIG_AUDIO_PIPELINE_EVENT_QUEUE_DEPTH`; on

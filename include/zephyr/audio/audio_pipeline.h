@@ -91,6 +91,17 @@ struct audio_pipeline {
 	struct audio_pipeline_event *event_slots;
 	size_t event_slot_count;
 
+	/* How often the built-in event slots had changed hands when this
+	 * instance last claimed them, which is what says whether the @c k_msgq
+	 * above still describes the contents of the storage it points at. Unused
+	 * by an instance that brought its own slots; zero means "never claimed".
+	 *
+	 * Private to the subsystem: observe it through the return value of
+	 * audio_pipeline_get_event(), which refuses a binding another instance
+	 * has since reset with @c -EPERM instead of reading that instance's ring.
+	 */
+	uint32_t event_slots_epoch;
+
 	/* Released whenever the worker must leave its idle wait. */
 	struct k_sem wake;
 
@@ -313,11 +324,23 @@ int audio_pipeline_stop(struct audio_pipeline *pipeline);
  * hand-rolled pipeline can claim it. The restart above then reclaims it, and
  * fails with @c -EBUSY if another instance got there first. Between the join
  * and that successful reclaim the instance owns nothing, even though it still
- * points at the built-ins: do not call audio_pipeline_process_frame() or
- * audio_pipeline_get_event() on it in that window, or it will read and write
- * storage the new owner is using. An instance running on the built-ins must
- * therefore be joined before it goes out of scope - nothing else gives them
- * back.
+ * points at the built-ins.
+ *
+ * The event queue is defined in that window rather than left to chance:
+ * audio_pipeline_get_event() keeps delivering the events already queued - the
+ * ERROR event of a failing close() included - until another instance claims the
+ * built-in slots, and returns @c -EPERM from then on instead of reading the new
+ * owner's ring. A restart rebinds the queue, so an instance that comes back
+ * after another one has used the slots starts from an empty queue rather than
+ * inheriting what that instance left behind. An instance with its own event
+ * slots (AUDIO_PIPELINE_DEFINE()) is never affected: nothing else can reach
+ * them, and its queue survives join() untouched.
+ *
+ * audio_pipeline_process_frame() gets no such guard - do not call it on a
+ * joined instance, or it will read and write the frame buffer the new owner is
+ * using. An instance running on the built-ins must be joined before it goes out
+ * of scope - nothing else gives them back, and an abandoned one locks every
+ * later hand-rolled pipeline out with @c -EBUSY.
  *
  * @retval 0 on success
  * @retval -EINVAL if the pipeline was not initialised

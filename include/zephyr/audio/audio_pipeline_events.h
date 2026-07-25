@@ -64,12 +64,31 @@ struct audio_pipeline;
  * registered callback has already returned by the time this call hands the
  * event over.
  *
+ * After audio_pipeline_join():
+ *
+ *  - An instance with its own event slots (AUDIO_PIPELINE_DEFINE()) reads on as
+ *    before; join() does not touch its queue.
+ *  - An instance running on the built-in slots keeps delivering what is already
+ *    queued, including the ERROR event join() publishes when a node's close()
+ *    fails - the slots are free again, but nothing else has written to them.
+ *  - Once another instance claims those built-in slots, this call returns
+ *    @c -EPERM for the joined one and never touches the storage again: the new
+ *    owner has re-initialised the same ring, so reading through the old binding
+ *    would consume that instance's events. Drain the queue before joining if
+ *    the events still matter, or read them through the event callback, which
+ *    runs on the publishing thread.
+ *  - A later audio_pipeline_start() rebinds the queue, so the restarted
+ *    instance begins with an empty one rather than the intervening owner's
+ *    leftovers.
+ *
  * @param pipeline Pipeline to read from; must have been initialised.
  * @param event    Receives the event on success.
  * @param timeout  Waiting period.
  *
  * @retval 0 an event was written to @p event
  * @retval -EINVAL on a NULL argument or an uninitialised pipeline
+ * @retval -EPERM the built-in event slots this pipeline points at have been
+ *         claimed by another instance since it was joined
  * @retval -ENOMSG the queue was empty and @p timeout was @c K_NO_WAIT
  * @retval -EAGAIN the waiting period expired with no event
  */
