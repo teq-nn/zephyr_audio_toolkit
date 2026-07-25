@@ -24,7 +24,9 @@ The subsystem provides a **lightweight audio pipeline** that chains audio data a
 ### 1.3 Non-goals (v1)
 
 - No generic support for float processing (extensibility only).
-- No dynamic runtime reconfiguration of the pipeline (format & structure are static in v1).
+- No dynamic runtime reconfiguration of the pipeline *while it runs*. Structure is static in v1;
+  the format is fixed for the duration of a run and may be rebound between runs, while the node
+  chain is closed (§5.2).
 - No multi-input or multi-output nodes (no mixer/splitter in v1).
 
 ---
@@ -109,6 +111,13 @@ sink -> filter -> filter -> source
   - Nodes are **not reentrant** and need no internal thread safety.
 - **Event queue**  
   - May be read by the application from any thread (Zephyr-style `k_msgq` semantics).
+- **Pipeline format**  
+  - Written only by `audio_pipeline_set_format()`, i.e. from the control thread, and only while the
+    node chain is closed (§5.2, §8.1).
+  - Read by a node in its `open()`, which the control thread also drives, inside
+    `audio_pipeline_start()`. The worker thread never reads it.
+  - Both accesses are therefore already serialised by this rule, which is why the bound format needs
+    no mutex. A future revision that relaxes control-thread exclusivity would have to add one.
 
 ---
 
@@ -141,8 +150,23 @@ struct audio_node {
     const struct audio_node_ops *ops;
     struct audio_node *upstream; /* NULL for sources */
     void *state;                 /* implementation-specific state */
+
+    /* Pipeline format, installed by the pipeline before open() (§5.2).
+     * Owned by the pipeline; NULL until the node is opened. */
+    const struct audio_stream_config *pipeline_format;
 };
 ```
+
+**The format reaches nodes through the node object, not through `open()`.**
+`open()`, `process()` and `close()` keep the signatures above. The pipeline writes
+`pipeline_format` on every node in the chain immediately before it calls that node's
+`open()`, so a node reads its pipeline's format as `node->pipeline_format` and needs no
+route back to the pipeline object. The field is read-only to the node and stable for as
+long as the node is open (§5.2).
+
+Adding a parameter to `open()` was rejected: the format is a property of the node's
+binding, not of the act of opening, and threading it through the op signature would churn
+every node and every fake for a value most nodes ignore.
 
 **Naming convention:**  
 The function pointers in `audio_node_ops` are named **`open`**, **`process`**, **`close`** (“opc”), as requested.
@@ -224,18 +248,17 @@ Note:
 - Enum value: `AUDIO_SAMPLE_FORMAT_S32_LE`
 - All nodes work internally with 32-bit samples.
 
-### 5.2 Valid bits per sample
+### 5.2 The pipeline format
 
 ```c
-struct audio_format {
-    uint32_t sample_rate;           /* Hz, e.g. 44100, 48000 */
-    uint8_t  channels;              /* v1: always 2 */
+struct audio_stream_config {
+    uint32_t sample_rate_hz;        /* Hz, e.g. 44100, 48000 */
+    uint8_t  channels;              /* v1: 1 or 2 */
     uint8_t  valid_bits_per_sample; /* e.g. 16, 24, 32 */
     enum audio_sample_format format;/* internal: AUDIO_SAMPLE_FORMAT_S32_LE */
 };
 ```
 
-- In v1 `channels` is fixed to **2** (stereo).  
 - Samples are **interleaved** in the buffer:
 
 ```text
@@ -245,7 +268,51 @@ buf: L0, R0, L1, R1, L2, R2, ...
 - `valid_bits_per_sample` describes the effective resolution:
   - e.g., `16` for data converted from 16-bit PCM,
   - `24` or `32` for higher resolution.
-- Sample rate and channel count are pipeline-wide settings defined once with the pipeline format.
+
+#### Binding: one format, declared top-down
+
+Sample rate and channel count are **pipeline-wide** and are declared by the application
+before the chain opens. The pipeline is the single authority; nodes do not negotiate with
+each other and no node infers the format from its peers.
+
+- The format is bound with `audio_pipeline_set_format()` (§8.1) and lives in storage the
+  **pipeline owns**. There is no format field on `audio_pipeline_config`: one setter is
+  the only way in, so there is never a second place to look.
+- `audio_pipeline_start()` refuses a pipeline with no bound format (`-ENODATA`) rather
+  than inventing a default.
+- Immediately before it calls a node's `open()`, the pipeline installs the bound format on
+  that node as `audio_node.pipeline_format` (§4.1).
+
+#### Matching: nodes validate, they do not adapt
+
+Every node checks the bound format in `open()` against what it can actually deliver or
+accept, and **fails the open** when it cannot comply. v1 has no resampler and no channel
+mapper (§1.3, §13), so a node can only match or refuse.
+
+- **`sample_rate_hz` and `channels` must match exactly.** A source whose real, on-disk
+  format disagrees with the bound format returns `-ENOTSUP` from `open()`; so does a sink
+  that cannot emit the bound format. Because every node is checked against the same bound
+  format, source and sink agree transitively — the pipeline performs no separate
+  source-versus-sink comparison.
+- **`valid_bits_per_sample` is enforced per node**, not by a pipeline-wide equality check.
+  It describes the resolution carried inside the canonical S32_LE container, and which
+  depths a node supports is a property of that node. v1's file reader and file writer both
+  support 16-bit only, so a bound format asking for 24-bit fails loudly at `open()` (§5.3).
+
+This is what makes a mismatch impossible to observe as a silently mislabelled file: a
+44.1 kHz mono track can only reach a 44.1 kHz mono sink, because both were checked against
+the same bound format before either produced a sample.
+
+#### Reconfiguration
+
+The bound format may be replaced between runs, but **only while the node chain is closed** —
+before the first `audio_pipeline_start()`, or after `audio_pipeline_join()`. Nodes read the
+format in `open()` and keep using it for as long as they are open, so changing it underneath
+an open chain would leave nodes holding a stale format. `set_format()` returns `-EBUSY`
+otherwise (§8.1).
+
+This lifts the v1 restriction that the format is static for the entire runtime: it is static
+for the duration of a run, and rebindable between runs.
 
 ### 5.3 Format conversion
 
@@ -272,7 +339,10 @@ struct audio_pipeline {
     struct audio_node **filters;
     size_t filter_count;
 
-    struct audio_format format;
+    /* Bound format, owned by the pipeline and installed on every node before
+     * open() (§5.2). Written only by audio_pipeline_set_format(). */
+    struct audio_stream_config format;
+    bool format_bound;
 
     struct k_thread thread;
     k_thread_stack_t *stack;
@@ -398,7 +468,7 @@ int audio_pipeline_set_nodes(struct audio_pipeline *pl,
                              struct audio_node *sink);
 
 int audio_pipeline_set_format(struct audio_pipeline *pl,
-                              const struct audio_format *fmt);
+                              const struct audio_stream_config *fmt);
 ```
 
 Agreements:
@@ -413,8 +483,22 @@ Agreements:
   - assigns `source`, filter list, and `sink`,
   - internally links `upstream` pointers (Filter[i].upstream = (i==0 ? source : Filter[i-1]); sink.upstream = last filter or source).
 - `audio_pipeline_set_format()`:
-  - sets the `audio_format` valid for the whole pipeline.  
-  - v1: format is static for the entire runtime.
+  - copies `fmt` into pipeline-owned storage, where it becomes the one format valid for the whole
+    pipeline (§5.2). The caller's struct is not retained and may be a temporary.
+  - is the **only** way to bind a format. `audio_pipeline_config` carries no format field, so an
+    application cannot declare one statically and then wonder which of the two is live.
+  - must be called after `audio_pipeline_init()` — it writes instance storage that `init()` binds —
+    and returns `-EINVAL` on a pipeline that is not initialised, or on a `fmt` a node could never
+    satisfy (zero `sample_rate_hz`, zero `channels`).
+  - is legal only while the **node chain is closed**: before the first `start()`, or after
+    `join()`. It returns `-EBUSY` while the nodes are open, whether the pipeline is playing or
+    merely idle, because nodes read the format at `open()` and hold it until they are closed.
+  - is subject to §3.3 like every other `audio_pipeline_*` entry point: control thread only. That
+    is what makes a lock unnecessary — the worker thread never reads the bound format, it only
+    walks nodes that were handed it at open time.
+  - is cleared by a subsequent `audio_pipeline_init()`. Re-initialising rebinds the instance to a
+    new configuration and sink, and a format carried over from the previous binding would be a
+    stale default nobody chose; `start()` then reports `-ENODATA` until a format is set again.
 
 ### 8.2 Lifecycle
 
@@ -428,10 +512,14 @@ int audio_pipeline_join(struct audio_pipeline *pl); /* optional: wait for thread
 Recommended behavior:
 
 - `audio_pipeline_start()`:
+  - refuses a pipeline with **no bound format** (§5.2) with `-ENODATA`, before it claims anything
+    or creates a thread. The code is distinct from the `-EINVAL` of a malformed configuration so
+    that "you never called `set_format()`" is not confused with "your configuration is wrong",
   - reclaims the built-in resources the instance runs on (§6.1), failing with `-EBUSY` and without
     an ERROR event if another instance took them after a join,
   - creates the thread (if not already existing),
-  - opens all nodes via `node->ops->open`.
+  - installs the bound format on each node (§4.1) and opens all nodes via `node->ops->open`. A node
+    that cannot accept the format fails its open, which fails `start()` (§5.2).
 - `audio_pipeline_play()`:
   - sets `pl->playing = true`,
   - pipeline thread begins pulling frames.
@@ -522,7 +610,12 @@ struct audio_file_reader_state {
 - `open()`:
   - open file,
   - parse header,
-  - set `fmt`,
+  - set `fmt` from the parsed header — this is the file's **real** format, and it is what
+    the node validates against `node->pipeline_format` (§4.1),
+  - **reject a file that disagrees with the bound format** (§5.2): a `sample_rate_hz` or
+    `channels` other than the pipeline's returns `-ENOTSUP` and the file is closed again.
+    v1 has no resampler, so the reader cannot convert a 44.1 kHz file for a 48 kHz
+    pipeline — it can only refuse it,
   - `bytes_read = 0`, `eof = false`.
 - `process()`:
   - reads `capacity` * 2 (channels) * 2 (bytes per sample) from file,
@@ -550,10 +643,17 @@ Implementation mirrors the reader, in reverse. Two decisions are contract:
   only bytes the filesystem confirmed, so it can never exceed the payload on disk.
   An aborted run therefore leaves a structurally valid header declaring an empty
   track: a reader sees immediate EOF, never a bogus length.
-- **`audio_file_writer_state.fmt` is the sink-side format seam.** The node has no
-  route to the pipeline config, so the output format lives on the per-instance
-  state. Zero fields take defaults in `open()` (48000 Hz, 2 channels, 16 bit) and
-  the resolved values are written back, so the effective format stays observable.
+- **The output format comes from the pipeline, not from the node.** `open()` reads
+  `node->pipeline_format` (§4.1) and writes exactly that into the WAV header, so the
+  header can never describe a stream different from the one the pipeline carries. The
+  node resolves **no defaults**: there is no 48 kHz/2-channel fallback, because a format
+  is always bound before `start()` runs (§5.2) and a sink guessing one would be the very
+  mislabelling this seam exists to prevent. `audio_file_writer_state.fmt` keeps the
+  resolved format observable after `open()`, but it is now a copy of the pipeline's
+  format rather than an independent source of truth.
+- **The writer refuses what it cannot emit.** v1 writes 16-bit PCM into at most two
+  channels, so `open()` returns `-ENOTSUP` for a bound format with
+  `valid_bits_per_sample != 16` or `channels > 2` (§5.2), before it creates the file.
 
 Conversion is **truncation toward negative infinity** — keep the top 16 bits,
 `(uint16_t)((uint32_t)sample >> 16)`. No rounding bias and no clipping: a 32-bit
