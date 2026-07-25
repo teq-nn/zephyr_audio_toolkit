@@ -19,8 +19,14 @@
 #include <zephyr/audio/audio_node.h>
 #include <zephyr/audio/audio_pipeline_events.h>
 
+/**
+ * @brief Static configuration of a pipeline instance.
+ *
+ * Carries no format: the pipeline format is bound at run time with
+ * audio_pipeline_set_format() and nowhere else, so there is never a second
+ * place to look for the format a run is using (spec §5.2/§8.1).
+ */
 struct audio_pipeline_config {
-	struct audio_stream_config stream;
 	uint16_t frame_samples;
 	audio_pipeline_event_callback_t event_cb;
 	void *event_user_data;
@@ -57,6 +63,15 @@ struct audio_pipeline {
 	/* Topology and configuration, both owned by the caller. */
 	const struct audio_pipeline_config *config;
 	struct audio_node *sink;
+
+	/* The one format this pipeline runs at, owned by the pipeline and
+	 * installed on every node before that node is opened (spec §5.2).
+	 * Written only by audio_pipeline_set_format(); @p format_bound stays
+	 * false until it has been, which is what audio_pipeline_start() refuses
+	 * on. audio_pipeline_init() clears both again.
+	 */
+	struct audio_stream_config format;
+	bool format_bound;
 
 	/* Worker thread resources (see above). */
 	struct k_thread thread;
@@ -159,6 +174,11 @@ bool audio_pipeline_config_is_valid(const struct audio_pipeline_config *config);
  * of its built-ins keeps the configuration and pointers of its previous life
  * rather than being rebound to the new caller's.
  *
+ * The bound format is cleared (spec §8.1): re-initialising rebinds the instance
+ * to a new configuration and sink, and a format carried over from its previous
+ * life would be a stale default nobody chose. audio_pipeline_start() reports
+ * @c -ENODATA until audio_pipeline_set_format() is called again.
+ *
  * @retval 0 on success
  * @retval -EINVAL on a NULL argument or an invalid configuration
  * @retval -EBUSY if the worker thread of this instance is still running, or if
@@ -169,7 +189,50 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
 			struct audio_node *sink);
 
 /**
+ * @brief Bind the one format this pipeline runs at.
+ *
+ * @p fmt is copied into pipeline-owned storage, so the caller's struct may be a
+ * temporary. This is the *only* way to bind a format: sample rate and channel
+ * count are pipeline-wide, declared top-down by the application, and no node
+ * infers them from its peers (spec §5.2).
+ *
+ * audio_pipeline_start() installs the bound format on every node before it
+ * opens that node, and a node that cannot deliver or accept it fails its open()
+ * - v1 has no resampler and no channel mapper, so a mismatch is refused rather
+ * than converted.
+ *
+ * Legal only while the node chain is closed: before the first
+ * audio_pipeline_start(), or after audio_pipeline_join(). Nodes read the format
+ * in open() and hold it until they are closed, so replacing it underneath an
+ * open chain would leave them with a stale one.
+ *
+ * Control thread only, like every other @c audio_pipeline_* entry point
+ * (spec §3.3). The worker thread never reads the bound format, which is why
+ * this needs no lock.
+ *
+ * @param pipeline Initialised pipeline instance.
+ * @param fmt      Format to copy in; @c sample_rate_hz and @c channels must be
+ *                 non-zero.
+ *
+ * @retval 0 on success
+ * @retval -EINVAL on a NULL argument, on a pipeline that is not initialised, or
+ *         on a format no node could satisfy
+ * @retval -EBUSY while the node chain is open, whether the pipeline is playing
+ *         or merely idle
+ */
+int audio_pipeline_set_format(struct audio_pipeline *pipeline,
+			      const struct audio_stream_config *fmt);
+
+/**
  * @brief Open the node chain and create the worker thread.
+ *
+ * The bound format is installed on each node immediately before that node is
+ * opened (spec §5.2), so a node validates it from @c audio_node.pipeline_format
+ * inside its own open(). A pipeline with no bound format is refused with
+ * @c -ENODATA before anything is claimed and before a thread exists - distinct
+ * from the @c -EINVAL of a malformed configuration, so "you never called
+ * audio_pipeline_set_format()" cannot be confused with "your configuration is
+ * wrong".
  *
  * Nodes are opened sink first, then walking @c upstream. If a node's open()
  * fails, the nodes already opened are closed again, an
@@ -187,9 +250,11 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
  *
  * @retval 0 on success
  * @retval -EINVAL if the pipeline was not initialised
+ * @retval -ENODATA if no format was bound with audio_pipeline_set_format()
  * @retval -EBUSY if another instance has taken over a built-in resource this
  *         one was joined out of
  * @retval -ELOOP if the upstream chain exceeds the supported depth
+ * @retval -ENOTSUP if a node cannot deliver or accept the bound format
  * @retval <0 the first node open() error
  */
 int audio_pipeline_start(struct audio_pipeline *pipeline);

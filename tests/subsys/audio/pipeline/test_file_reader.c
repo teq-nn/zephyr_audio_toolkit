@@ -45,6 +45,29 @@ AUDIO_PIPELINE_DEFINE(chain_pipeline, CHAIN_FRAME_SAMPLES,
 		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
 
 /*
+ * Two chains whose file disagrees with the bound format - once in the sample
+ * rate, once in the channel count. They share one pipeline instance, which is
+ * rebound to the sink under test, because no run ever gets as far as creating a
+ * worker thread.
+ */
+AUDIO_FILE_READER_NODE_DEFINE(rate_reader, AUDIO_TEST_PATH("rate.wav"));
+AUDIO_NULL_SINK_NODE_DEFINE(rate_sink, &rate_reader);
+AUDIO_FILE_READER_NODE_DEFINE(chan_reader, AUDIO_TEST_PATH("chan.wav"));
+AUDIO_NULL_SINK_NODE_DEFINE(chan_sink, &chan_reader);
+AUDIO_PIPELINE_DEFINE(mismatch_pipeline, CHAIN_FRAME_SAMPLES,
+		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
+
+/* What the fixture helpers write by default (48 kHz, stereo, 16 bit), so a
+ * pipeline bound to this accepts an unmodified fixture.
+ */
+static const struct audio_stream_config fixture_format = {
+	.sample_rate_hz = 48000U,
+	.channels = 2U,
+	.valid_bits_per_sample = 16U,
+	.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+};
+
+/*
  * Interesting 16 bit values, deliberately including both signed extremes and
  * a negative mid-scale value: sign extension is where an S16 -> S32 widening
  * goes wrong first.
@@ -145,6 +168,85 @@ ZTEST(audio_pipeline_file_reader, test_source_publishes_parsed_format)
 	zassert_false(state->eof, "a fresh reader must not start at EOF");
 
 	zassert_equal(audio_node_close(&pcm_reader), 0, "close failed");
+}
+
+/* -------------------------------------------------------------------------
+ * open(): the file must match the format the pipeline bound (spec §5.2/§10.1)
+ * ----------------------------------------------------------------------
+ */
+
+/* Drive a mismatching chain through start() and check that it is refused with
+ * @p expected before a worker thread exists, and that the ERROR event says the
+ * same thing.
+ */
+static void assert_start_refuses(struct audio_node *sink, int expected)
+{
+	static const struct audio_pipeline_config cfg = {
+		.frame_samples = CHAIN_FRAME_SAMPLES,
+		.event_cb = NULL,
+		.event_user_data = NULL,
+	};
+	struct audio_pipeline_event event;
+
+	zassert_equal(audio_pipeline_init(&mismatch_pipeline, &cfg, sink), 0, "init failed");
+	zassert_equal(audio_pipeline_set_format(&mismatch_pipeline, &fixture_format), 0,
+		      "binding the pipeline format failed");
+
+	zassert_equal(audio_pipeline_start(&mismatch_pipeline), expected,
+		      "start() did not refuse the mismatching chain with %d", expected);
+	zassert_false(audio_pipeline_is_running(&mismatch_pipeline),
+		      "a worker thread was created for a chain that cannot open");
+
+	zassert_equal(audio_pipeline_get_event(&mismatch_pipeline, &event, K_NO_WAIT), 0,
+		      "no ERROR event was published");
+	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_ERROR, "expected an ERROR event, got %d",
+		      (int)event.type);
+	zassert_equal(event.err, expected, "the event carries %d, expected %d", event.err, expected);
+}
+
+ZTEST(audio_pipeline_file_reader, test_source_rejects_a_rate_the_pipeline_did_not_bind)
+{
+	struct audio_test_wav_spec spec = {
+		/* The pipeline is bound to 48 kHz below. */
+		.sample_rate_hz = 44100U,
+		.payload = known_samples,
+		.payload_len = sizeof(known_samples),
+	};
+	struct audio_file_reader_state *state = rate_reader.state;
+
+	zassert_equal(audio_test_write_wav(AUDIO_TEST_PATH("rate.wav"), &spec), 0,
+		      "could not write the fixture");
+
+	/* v1 has no resampler (spec §1.3), so the reader can only refuse: playing
+	 * a 44.1 kHz track out of a 48 kHz pipeline is the silent mislabelling
+	 * the bound format exists to prevent.
+	 */
+	assert_start_refuses(&rate_sink, -ENOTSUP);
+
+	zassert_false(state->file_open, "a refused open() left the file handle behind");
+	zassert_equal(state->fmt.sample_rate_hz, 0U, "a refused open() published a format");
+}
+
+ZTEST(audio_pipeline_file_reader, test_source_rejects_a_channel_count_the_pipeline_did_not_bind)
+{
+	struct audio_test_wav_spec spec = {
+		/* Mono, while the pipeline below is bound to stereo. Both counts
+		 * are inside the reader's own 1..2 range, so only the comparison
+		 * against the bound format can catch this.
+		 */
+		.channels = 1U,
+		.payload = known_samples,
+		.payload_len = sizeof(known_samples),
+	};
+	struct audio_file_reader_state *state = chan_reader.state;
+
+	zassert_equal(audio_test_write_wav(AUDIO_TEST_PATH("chan.wav"), &spec), 0,
+		      "could not write the fixture");
+
+	assert_start_refuses(&chan_sink, -ENOTSUP);
+
+	zassert_false(state->file_open, "a refused open() left the file handle behind");
+	zassert_equal(state->fmt.channels, 0U, "a refused open() published a format");
 }
 
 /* -------------------------------------------------------------------------
@@ -375,12 +477,6 @@ ZTEST(audio_pipeline_file_reader, test_source_close_releases_handle_and_allows_r
 ZTEST(audio_pipeline_file_reader, test_source_drives_pipeline_to_eof_event)
 {
 	static const struct audio_pipeline_config cfg = {
-		.stream = {
-			.sample_rate_hz = 48000U,
-			.channels = 2U,
-			.valid_bits_per_sample = 16U,
-			.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-		},
 		.frame_samples = CHAIN_FRAME_SAMPLES,
 		.event_cb = NULL,
 		.event_user_data = NULL,
@@ -398,6 +494,8 @@ ZTEST(audio_pipeline_file_reader, test_source_drives_pipeline_to_eof_event)
 		      0, "could not write the fixture");
 
 	zassert_equal(audio_pipeline_init(&chain_pipeline, &cfg, &chain_sink), 0, "init failed");
+	zassert_equal(audio_pipeline_set_format(&chain_pipeline, &fixture_format), 0,
+		      "binding the pipeline format failed");
 	zassert_equal(audio_pipeline_start(&chain_pipeline), 0, "start failed");
 	zassert_equal(audio_pipeline_play(&chain_pipeline), 0, "play failed");
 

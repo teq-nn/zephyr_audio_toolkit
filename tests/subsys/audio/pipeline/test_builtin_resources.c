@@ -67,24 +67,29 @@ static struct audio_pipeline_event own_event_slots[AUDIO_PIPELINE_EVENT_QUEUE_DE
 static K_THREAD_STACK_DEFINE(own_stack, CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE);
 
 static const struct audio_pipeline_config first_config = {
-	.stream = {
-		.sample_rate_hz = 48000U,
-		.channels = 2U,
-		.valid_bits_per_sample = 24U,
-		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-	},
 	.frame_samples = FIRST_FRAME_SAMPLES,
 };
 
 static const struct audio_pipeline_config second_config = {
-	.stream = {
-		.sample_rate_hz = 48000U,
-		.channels = 2U,
-		.valid_bits_per_sample = 24U,
-		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-	},
 	.frame_samples = SECOND_FRAME_SAMPLES,
 };
+
+/* The format every instance here runs at; the fakes accept anything, so the
+ * suite only needs one. init() clears the binding (spec §8.1), so a successful
+ * init() is always followed by a bind_format().
+ */
+static const struct audio_stream_config builtin_format = {
+	.sample_rate_hz = 48000U,
+	.channels = 2U,
+	.valid_bits_per_sample = 24U,
+	.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+};
+
+static void bind_format(struct audio_pipeline *pipeline)
+{
+	zassert_equal(audio_pipeline_set_format(pipeline, &builtin_format), 0,
+		      "binding the pipeline format failed");
+}
 
 /* Wipe one chain and give its source and sink a shared pattern, so a frame
  * written by the other chain cannot pass the sink's check.
@@ -136,6 +141,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_refuse_a_second_c
 {
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
 	zassert_not_null(first_pipeline.stack, "no built-in stack installed");
 	zassert_not_null(first_pipeline.frame_buf, "no built-in frame buffer installed");
 	zassert_not_null(first_pipeline.event_slots, "no built-in event slots installed");
@@ -156,12 +162,14 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_allow_the_owner_t
 {
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
 
 	/* Rebinding an instance to a new configuration or sink is a supported
 	 * move, so the owner must not lock itself out of its own built-ins.
 	 */
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the owner was refused the built-ins it already holds");
+	bind_format(&first_pipeline);
 
 	zassert_equal(audio_pipeline_init(&second_pipeline, &second_config, &second_sink), -EBUSY,
 		      "a rebind released the built-ins to another instance");
@@ -178,6 +186,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_are_claimed_per_r
 
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
 	zassert_equal_ptr(first_pipeline.stack, own_stack, "init() replaced the caller's stack");
 
 	/* Wants all three; two of them are taken, so it is refused. */
@@ -189,6 +198,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_are_claimed_per_r
 	 */
 	zassert_equal(audio_pipeline_init(&stack_only_pipeline, &second_config, &second_sink), 0,
 		      "an unclaimed built-in was refused because another one was taken");
+	bind_format(&stack_only_pipeline);
 	zassert_not_null(stack_only_pipeline.stack, "no built-in stack installed");
 	zassert_true(stack_only_pipeline.stack != own_stack,
 		     "the caller's own stack was handed to another instance");
@@ -209,6 +219,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_keep_the_first_cl
 
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
 	frame_buf = first_pipeline.frame_buf;
 	slots = first_pipeline.event_slots;
 
@@ -263,6 +274,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_return_to_the_poo
 
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
 	stack = first_pipeline.stack;
 	frame_buf = first_pipeline.frame_buf;
 	slots = first_pipeline.event_slots;
@@ -275,6 +287,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_return_to_the_poo
 	 */
 	zassert_equal(audio_pipeline_init(&second_pipeline, &second_config, &second_sink), 0,
 		      "join() did not release the built-ins");
+	bind_format(&second_pipeline);
 	zassert_equal_ptr(second_pipeline.stack, stack, "a second built-in stack appeared");
 	zassert_equal_ptr(second_pipeline.frame_buf, frame_buf,
 			  "a second built-in frame buffer appeared");

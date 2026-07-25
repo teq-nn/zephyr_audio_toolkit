@@ -87,6 +87,13 @@ struct audio_fake_source {
 
 	atomic_t open_calls;
 	atomic_t close_calls;
+	/**
+	 * @c audio_node.pipeline_format as it stood when open() was entered
+	 * (@c const struct audio_stream_config *). NULL means the pipeline had
+	 * not installed the bound format by then, which is the ordering
+	 * spec §5.2 forbids.
+	 */
+	atomic_ptr_t seen_format;
 	/** Frames handed out since the last open() or rewind. */
 	atomic_t frames_done;
 	/** Samples of @ref samples handed out since the last open() or rewind. */
@@ -139,6 +146,13 @@ struct audio_fake_sink {
 
 	atomic_t open_calls;
 	atomic_t close_calls;
+	/**
+	 * @c audio_node.pipeline_format as it stood when open() was entered
+	 * (@c const struct audio_stream_config *). NULL means the pipeline had
+	 * not installed the bound format by then, which is the ordering
+	 * spec §5.2 forbids.
+	 */
+	atomic_ptr_t seen_format;
 	/** Frames carrying samples. */
 	atomic_t frames_seen;
 	/** Frames reporting end of stream. */

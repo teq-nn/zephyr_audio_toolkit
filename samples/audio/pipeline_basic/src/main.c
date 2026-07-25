@@ -177,19 +177,23 @@ static int prepare_track(void)
 }
 
 static const struct audio_pipeline_config cfg = {
-	.stream = {
-		.sample_rate_hz = TRACK_SAMPLE_RATE_HZ,
-		.channels = TRACK_CHANNELS,
-		/* The container is 32 bit, the track's resolution is 16
-		 * (spec §5.2).
-		 */
-		.valid_bits_per_sample = TRACK_BITS_PER_SAMPLE,
-		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-	},
 	/* Same frame size the pipeline was defined with. */
 	.frame_samples = CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES,
 	.event_cb = pipeline_event_handler,
 	.event_user_data = NULL,
+};
+
+/*
+ * The one format the whole chain runs at (spec §5.2). The application declares
+ * it top-down; the reader refuses a file that disagrees and the sink writes
+ * exactly this into its header, so no node can invent a format of its own.
+ */
+static const struct audio_stream_config track_format = {
+	.sample_rate_hz = TRACK_SAMPLE_RATE_HZ,
+	.channels = TRACK_CHANNELS,
+	/* The container is 32 bit, the track's resolution is 16 (spec §5.2). */
+	.valid_bits_per_sample = TRACK_BITS_PER_SAMPLE,
+	.format = AUDIO_SAMPLE_FORMAT_S32_LE,
 };
 
 void main(void)
@@ -207,6 +211,15 @@ void main(void)
 	ret = audio_pipeline_init(&pipeline, &cfg, &sink);
 	if (ret < 0) {
 		printk("pipeline: init failed (%d)\n", ret);
+		return;
+	}
+
+	/* Bind the format before start(), which would otherwise refuse the
+	 * pipeline with -ENODATA rather than invent one (spec §8.1/§8.2).
+	 */
+	ret = audio_pipeline_set_format(&pipeline, &track_format);
+	if (ret < 0) {
+		printk("pipeline: format rejected (%d)\n", ret);
 		return;
 	}
 

@@ -44,13 +44,6 @@ LOG_MODULE_REGISTER(audio_file_writer, LOG_LEVEL_INF);
 /* Interleaving is pipeline-wide (spec §5.2); v1 is stereo, mono costs nothing. */
 #define FILE_WRITER_MAX_CHANNELS 2U
 
-/* Applied to every zero field of the caller's format, so a writer defined with
- * AUDIO_FILE_WRITER_NODE_DEFINE() and never touched again produces the v1
- * pipeline format.
- */
-#define FILE_WRITER_DEFAULT_RATE_HZ 48000U
-#define FILE_WRITER_DEFAULT_CHANNELS 2U
-
 /*
  * Serialise a canonical RIFF/WAVE header declaring @p data_bytes of payload
  * into the @p len bytes at @p header.
@@ -230,21 +223,28 @@ static int file_writer_open(struct audio_node *node)
 		return -EINVAL;
 	}
 
-	/* Reopening without a close() must not leak the previous handle. */
+	/* Reopening without a close() must not leak the previous handle - and it
+	 * has to happen before state->fmt is overwritten, because finalising the
+	 * previous file describes it with the previous format.
+	 */
 	(void)file_writer_release(state);
 
-	/* Resolve the defaults in place, so the format the node actually wrote
-	 * stays observable after open() (spec §5.2).
+	/* The output format comes from the pipeline and nowhere else
+	 * (spec §10.2): the node resolves *no* defaults, because a sink guessing
+	 * a rate or a channel count is exactly the mislabelling this seam
+	 * exists to prevent. A format is always bound before start() runs, so
+	 * the absence of one is a caller error, not a case to paper over.
 	 */
-	if (state->fmt.sample_rate_hz == 0U) {
-		state->fmt.sample_rate_hz = FILE_WRITER_DEFAULT_RATE_HZ;
+	if (!node->pipeline_format) {
+		LOG_ERR("%s: no pipeline format installed", state->path);
+		return -EINVAL;
 	}
-	if (state->fmt.channels == 0U) {
-		state->fmt.channels = FILE_WRITER_DEFAULT_CHANNELS;
-	}
-	if (state->fmt.valid_bits_per_sample == 0U) {
-		state->fmt.valid_bits_per_sample = FILE_WRITER_BITS_PER_SAMPLE;
-	}
+
+	/* Copied so the format the node actually wrote stays observable after
+	 * open(); it is a copy of the pipeline's format, not a second source of
+	 * truth.
+	 */
+	state->fmt = *node->pipeline_format;
 	/* The container handed to process() is canonical by definition. */
 	state->fmt.format = AUDIO_SAMPLE_FORMAT_S32_LE;
 

@@ -6,6 +6,8 @@
  */
 
 #include <errno.h>
+#include <string.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
@@ -200,6 +202,14 @@ static int pipeline_open_nodes(struct audio_pipeline *pipeline)
 			return -ELOOP;
 		}
 
+		/* Top-down format binding (spec §5.2): every node is handed the
+		 * pipeline's format immediately before it is opened, and the
+		 * node validates it in open(). Installing it here rather than
+		 * ahead of the walk keeps the two steps adjacent, so a node can
+		 * never be opened without one.
+		 */
+		node->pipeline_format = &pipeline->format;
+
 		ret = audio_node_open(node);
 		if (ret < 0) {
 			LOG_ERR("node open failed (%d)", ret);
@@ -297,6 +307,13 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
 
 	audio_pipeline_event_queue_init(pipeline);
 
+	/* A rebind must not inherit the format of the instance's previous life:
+	 * that would be a default nobody chose (spec §8.1). start() reports
+	 * -ENODATA until audio_pipeline_set_format() is called again.
+	 */
+	memset(&pipeline->format, 0, sizeof(pipeline->format));
+	pipeline->format_bound = false;
+
 	pipeline->nodes_open = false;
 	pipeline->running = false;
 	pipeline->playing = false;
@@ -308,12 +325,53 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
 	return 0;
 }
 
+int audio_pipeline_set_format(struct audio_pipeline *pipeline,
+			      const struct audio_stream_config *fmt)
+{
+	if (!pipeline || !fmt || !pipeline->initialized) {
+		return -EINVAL;
+	}
+
+	/* A format no node could ever satisfy is refused here rather than at the
+	 * first open(), where it would look like a node defect (spec §8.1).
+	 */
+	if (fmt->sample_rate_hz == 0U || fmt->channels == 0U) {
+		LOG_ERR("a pipeline format needs a sample rate and a channel count");
+		return -EINVAL;
+	}
+
+	/* Only while the chain is closed (spec §5.2): the nodes read the format
+	 * in open() and hold it until they are closed, so swapping it underneath
+	 * an open chain would leave them running on a stale one. "Not playing"
+	 * would not be tight enough - nodes stay open across EOF and stop().
+	 */
+	if (pipeline->nodes_open) {
+		LOG_ERR("the node chain is open; join() before rebinding the format");
+		return -EBUSY;
+	}
+
+	pipeline->format = *fmt;
+	pipeline->format_bound = true;
+
+	return 0;
+}
+
 int audio_pipeline_start(struct audio_pipeline *pipeline)
 {
 	int ret;
 
 	if (!pipeline || !pipeline->initialized || !pipeline->sink) {
 		return -EINVAL;
+	}
+
+	/* Before anything is claimed and before a thread exists, so a pipeline
+	 * nobody bound a format to leaves no trace at all. -ENODATA rather than
+	 * -EINVAL keeps "you never called audio_pipeline_set_format()" apart
+	 * from "your configuration is wrong" (spec §8.2).
+	 */
+	if (!pipeline->format_bound) {
+		LOG_ERR("no pipeline format bound; call audio_pipeline_set_format() first");
+		return -ENODATA;
 	}
 
 	/* An instance that was joined gave its built-ins back, so take them again

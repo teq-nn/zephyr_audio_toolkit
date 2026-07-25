@@ -65,15 +65,19 @@ static void test_event_cb(const struct audio_pipeline_event *event, void *user_d
 }
 
 static const struct audio_pipeline_config test_config = {
-	.stream = {
-		.sample_rate_hz = 48000U,
-		.channels = 2U,
-		.valid_bits_per_sample = 24U,
-		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-	},
 	.frame_samples = CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES,
 	.event_cb = test_event_cb,
 	.event_user_data = NULL,
+};
+
+/* Bound after every init(), which clears the binding (spec §8.1). The fakes
+ * accept any format, so the values only have to be well formed.
+ */
+static const struct audio_stream_config test_format = {
+	.sample_rate_hz = 48000U,
+	.channels = 2U,
+	.valid_bits_per_sample = 24U,
+	.format = AUDIO_SAMPLE_FORMAT_S32_LE,
 };
 
 static void reader_entry(void *p1, void *p2, void *p3)
@@ -113,6 +117,8 @@ static void events_before(void *fixture)
 
 	zassert_equal(audio_pipeline_init(&test_pipeline, &test_config, &test_sink), 0,
 		      "init failed");
+	zassert_equal(audio_pipeline_set_format(&test_pipeline, &test_format), 0,
+		      "binding the pipeline format failed");
 }
 
 static void events_after(void *fixture)
@@ -281,6 +287,8 @@ ZTEST(audio_pipeline_events, test_init_purges_stale_events)
 	 */
 	zassert_equal(audio_pipeline_init(&test_pipeline, &test_config, &test_sink), 0,
 		      "re-init failed");
+	zassert_equal(audio_pipeline_set_format(&test_pipeline, &test_format), 0,
+		      "rebinding the format after init() failed");
 	zassert_equal(audio_pipeline_get_event(&test_pipeline, &event, K_NO_WAIT), -ENOMSG,
 		      "init did not purge the event queue");
 }
@@ -347,12 +355,6 @@ ZTEST(audio_pipeline_events, test_callback_still_receives_events_alongside_the_q
 ZTEST(audio_pipeline_events, test_events_are_delivered_without_a_callback)
 {
 	static const struct audio_pipeline_config queue_only_config = {
-		.stream = {
-			.sample_rate_hz = 48000U,
-			.channels = 2U,
-			.valid_bits_per_sample = 24U,
-			.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-		},
 		.frame_samples = CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES,
 		.event_cb = NULL,
 		.event_user_data = NULL,
@@ -363,6 +365,8 @@ ZTEST(audio_pipeline_events, test_events_are_delivered_without_a_callback)
 
 	zassert_equal(audio_pipeline_init(&test_pipeline, &queue_only_config, &test_sink), 0,
 		      "init without a callback failed");
+	zassert_equal(audio_pipeline_set_format(&test_pipeline, &test_format), 0,
+		      "binding the pipeline format failed");
 	zassert_equal(audio_pipeline_start(&test_pipeline), 0, "start failed");
 	zassert_equal(audio_pipeline_play(&test_pipeline), 0, "play failed");
 

@@ -27,6 +27,11 @@ static int fake_source_open(struct audio_node *node)
 	struct audio_fake_source *state = node->state;
 
 	atomic_inc(&state->open_calls);
+	/* Captured here rather than read from the node afterwards: the contract
+	 * is that the format is installed *before* open() runs (spec §5.2), and
+	 * only a snapshot taken inside open() can tell the two apart.
+	 */
+	atomic_ptr_set(&state->seen_format, (void *)node->pipeline_format);
 	audio_fake_source_rewind(state);
 
 	return state->open_ret;
@@ -128,6 +133,10 @@ static int fake_sink_open(struct audio_node *node)
 	struct audio_fake_sink *state = node->state;
 
 	atomic_inc(&state->open_calls);
+	/* See fake_source_open(): a snapshot taken inside open() is what proves
+	 * the pipeline installed the format before it called the node.
+	 */
+	atomic_ptr_set(&state->seen_format, (void *)node->pipeline_format);
 
 	return state->open_ret;
 }
