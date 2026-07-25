@@ -155,7 +155,13 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_refuse_a_second_c
 	zassert_is_null(second_pipeline.stack, "the refused instance kept a stack");
 	zassert_is_null(second_pipeline.frame_buf, "the refused instance kept a frame buffer");
 	zassert_is_null(second_pipeline.event_slots, "the refused instance kept event slots");
-	zassert_false(second_pipeline.initialized, "the refused instance was marked initialised");
+	/* Asked through the API rather than of a struct field: "not
+	 * initialised" is a lifecycle state, and audio_pipeline_stop() refusing
+	 * with -EINVAL is the only thing it means from outside. Every other
+	 * initialised state answers 0.
+	 */
+	zassert_equal(audio_pipeline_stop(&second_pipeline), -EINVAL,
+		      "the refused instance was marked initialised");
 }
 
 ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_allow_the_owner_to_reinitialise)

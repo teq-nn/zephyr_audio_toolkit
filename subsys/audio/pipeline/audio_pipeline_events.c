@@ -58,7 +58,8 @@ void audio_pipeline_publish_event(struct audio_pipeline *pipeline,
 	 * the newest event and keeps the oldest ones, which is where the first
 	 * error - the one that explains all the others - sits.
 	 */
-	if (pipeline->initialized && k_msgq_put(&pipeline->event_msgq, &evt, K_NO_WAIT) != 0) {
+	if (audio_pipeline_state_get(pipeline) != AUDIO_PIPELINE_STATE_UNINIT &&
+	    k_msgq_put(&pipeline->event_msgq, &evt, K_NO_WAIT) != 0) {
 		LOG_WRN("event queue full, dropped event %d (err %d)", (int)type, err);
 	}
 }
@@ -66,7 +67,8 @@ void audio_pipeline_publish_event(struct audio_pipeline *pipeline,
 int audio_pipeline_get_event(struct audio_pipeline *pipeline,
 			     struct audio_pipeline_event *event, k_timeout_t timeout)
 {
-	if (!pipeline || !event || !pipeline->initialized) {
+	if (!pipeline || !event ||
+	    audio_pipeline_state_get(pipeline) == AUDIO_PIPELINE_STATE_UNINIT) {
 		return -EINVAL;
 	}
 

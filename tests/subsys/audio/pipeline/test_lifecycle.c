@@ -145,11 +145,14 @@ ZTEST(audio_pipeline_lifecycle, test_start_opens_all_nodes)
 	zassert_equal(atomic_get(&filter_state.open_calls), 1, "filter not opened");
 	zassert_equal(atomic_get(&sink_state.open_calls), 1, "sink not opened");
 
+	/* The worker exists but must not have pulled anything: it pulls only
+	 * while the pipeline is playing, and nothing but play() enters that
+	 * state. That is the whole guarantee, and it holds the moment start()
+	 * returns - sleeping first and counting frames afterwards could only
+	 * ever miss a defect on a slow host, never catch one.
+	 */
 	zassert_true(audio_pipeline_is_running(&test_pipeline), "thread not running");
 	zassert_false(audio_pipeline_is_playing(&test_pipeline), "start must not play");
-
-	/* No play() yet, so the chain must stay untouched. */
-	k_msleep(20);
 	zassert_equal(atomic_get(&sink_state.frames_seen), 0U, "frames pulled before play()");
 
 	zassert_equal(audio_pipeline_join(&test_pipeline), 0, "join failed");
@@ -191,8 +194,6 @@ ZTEST(audio_pipeline_lifecycle, test_play_requires_start)
 
 ZTEST(audio_pipeline_lifecycle, test_stop_halts_playback_thread_idles)
 {
-	size_t frames;
-
 	source_state.frames_total = AUDIO_FAKE_ENDLESS;
 	sink_state.frame_sem = &frame_sem;
 	sink_state.gate_sem = &gate_sem;
@@ -205,23 +206,28 @@ ZTEST(audio_pipeline_lifecycle, test_stop_halts_playback_thread_idles)
 	zassert_true(audio_pipeline_is_playing(&test_pipeline), "not playing");
 
 	zassert_equal(audio_pipeline_stop(&test_pipeline), 0, "stop failed");
-	k_sem_give(&gate_sem);
 
-	/* At most the in-flight frame completes, then the worker idles. */
-	k_msleep(20);
-	frames = (size_t)atomic_get(&sink_state.frames_seen);
-
-	zassert_true(audio_pipeline_is_running(&test_pipeline), "stop() killed the thread");
+	/* The transition is complete when stop() returns - it is the caller's
+	 * own move, not something the worker gets around to - so there is
+	 * nothing to wait for here. The worker may still be finishing the frame
+	 * the sink is parked on, which is exactly why this asserts the state
+	 * rather than a frame count.
+	 */
 	zassert_false(audio_pipeline_is_playing(&test_pipeline), "still playing after stop()");
+	zassert_true(audio_pipeline_is_running(&test_pipeline), "stop() killed the thread");
 
-	k_msleep(20);
-	zassert_equal((size_t)atomic_get(&sink_state.frames_seen), frames,
-		      "frames pulled while stopped");
+	/* Release the parked sink so the in-flight frame completes. Its give of
+	 * frame_sem was consumed above, so the next successful take() can only
+	 * come from a frame pulled after this point - and while the pipeline is
+	 * stopped there is none, which is what makes the replay assertion below
+	 * mean something without a second frame counter.
+	 */
+	k_sem_give(&gate_sem);
 
 	/* Playback resumes on the same thread. */
 	zassert_equal(audio_pipeline_play(&test_pipeline), 0, "replay after stop failed");
+	zassert_true(audio_pipeline_is_playing(&test_pipeline), "play() did not resume playback");
 	zassert_equal(k_sem_take(&frame_sem, TEST_FRAME_TIMEOUT), 0, "no frame after replay");
-	zassert_true((size_t)atomic_get(&sink_state.frames_seen) > frames, "sink saw no new frame");
 
 	zassert_equal(audio_pipeline_stop(&test_pipeline), 0, "stop failed");
 	k_sem_give(&gate_sem);
@@ -243,16 +249,13 @@ ZTEST(audio_pipeline_lifecycle, test_eof_keeps_thread_alive)
 	zassert_equal(atomic_get(&sink_state.eof_seen), 1U, "sink did not see EOF");
 	zassert_equal(atomic_get(&filter_state.eof_seen), 1U, "filter did not forward EOF");
 
-	zassert_false(audio_pipeline_is_playing(&test_pipeline), "still playing after EOF");
-
-	/* Let the worker settle: the event fires from inside its loop, so its
-	 * liveness can only be judged once it has had time to leave or idle.
-	 * The thread must idle instead of spinning on the exhausted source.
+	/* The worker leaves the playing state *before* it publishes, so the
+	 * event having arrived is itself proof that the transition happened -
+	 * there is no settling time to wait out. The thread's liveness is a
+	 * state question too: nothing but a join request makes it return.
 	 */
-	k_msleep(20);
+	zassert_false(audio_pipeline_is_playing(&test_pipeline), "still playing after EOF");
 	zassert_true(audio_pipeline_is_running(&test_pipeline), "EOF terminated the thread");
-	zassert_equal(atomic_get(&sink_state.frames_seen), 3U, "kept pulling after EOF");
-	zassert_equal(eof_events, 1, "EOF event repeated while idle");
 
 	/* Nodes stay open across EOF so the next track needs no reopen. */
 	zassert_equal(atomic_get(&source_state.close_calls), 0, "source closed on EOF");
@@ -280,8 +283,11 @@ ZTEST(audio_pipeline_lifecycle, test_replay_after_eof)
 	zassert_equal(atomic_get(&source_state.open_calls), 1,
 		      "nodes reopened for the second track");
 
-	k_msleep(20);
+	/* Both tracks ran on the one thread, and it is still there: the second
+	 * EOF above could not have been published otherwise.
+	 */
 	zassert_true(audio_pipeline_is_running(&test_pipeline), "thread died between tracks");
+	zassert_false(audio_pipeline_is_playing(&test_pipeline), "still playing after track two");
 }
 
 ZTEST(audio_pipeline_lifecycle, test_node_error_stops_and_closes_nodes)
@@ -299,7 +305,13 @@ ZTEST(audio_pipeline_lifecycle, test_node_error_stops_and_closes_nodes)
 	zassert_equal(error_events, 1, "expected exactly one ERROR event");
 	zassert_equal(eof_events, 0, "error must not raise EOF");
 
+	/* The worker closes the chain and leaves the playing state before it
+	 * publishes, so the ERROR event having arrived settles all of this - no
+	 * sleep can make it truer. The thread itself survives the error
+	 * (spec §3.1); only a join request ends it.
+	 */
 	zassert_false(audio_pipeline_is_playing(&test_pipeline), "still playing after error");
+	zassert_true(audio_pipeline_is_running(&test_pipeline), "error terminated the thread");
 	zassert_equal(atomic_get(&sink_state.frames_seen), 1U,
 		      "processing did not stop at the first error");
 
@@ -311,8 +323,15 @@ ZTEST(audio_pipeline_lifecycle, test_node_error_stops_and_closes_nodes)
 	zassert_equal(atomic_get(&source_state.close_calls), 1, "source not closed after error");
 	zassert_equal(audio_pipeline_play(&test_pipeline), -EPERM, "play() after error allowed");
 
-	k_msleep(20);
-	zassert_true(audio_pipeline_is_running(&test_pipeline), "error terminated the thread");
+	/* start() reopens the chain onto the thread that is still there, which
+	 * is what separates the state a node error leaves behind from the one
+	 * join() leaves behind: the latter has no thread to reopen onto.
+	 */
+	zassert_equal(audio_pipeline_start(&test_pipeline), 0, "restart after error failed");
+	zassert_equal(atomic_get(&sink_state.open_calls), 2, "restart did not reopen the chain");
+	zassert_equal(atomic_get(&source_state.open_calls), 2, "restart did not reopen the source");
+	zassert_true(audio_pipeline_is_running(&test_pipeline), "the worker did not survive");
+	zassert_false(audio_pipeline_is_playing(&test_pipeline), "the reopen resumed playback");
 }
 
 ZTEST(audio_pipeline_lifecycle, test_join_terminates_thread_and_start_restarts)
@@ -333,6 +352,79 @@ ZTEST(audio_pipeline_lifecycle, test_join_terminates_thread_and_start_restarts)
 	zassert_equal(audio_pipeline_play(&test_pipeline), 0, "play after restart failed");
 	zassert_equal(k_sem_take(&event_sem, TEST_EVENT_TIMEOUT), 0, "no EOF after restart");
 	zassert_equal(eof_events, 1, "expected EOF after restart");
+}
+
+ZTEST(audio_pipeline_lifecycle, test_init_refuses_a_live_worker_thread)
+{
+	source_state.frames_total = 1U;
+
+	zassert_equal(audio_pipeline_start(&test_pipeline), 0, "start failed");
+
+	/* Rebinding an instance whose worker thread is still alive is the one
+	 * refusal init() owns by itself: there is no way out of a state that
+	 * holds a thread except through join().
+	 */
+	zassert_equal(audio_pipeline_init(&test_pipeline, &test_config, &test_sink), -EBUSY,
+		      "init() rebound a pipeline whose worker thread is alive");
+
+	/* And it wrote nothing on the way out: the thread is still there, the
+	 * chain is still open, and the format the fixture bound is still live -
+	 * a successful init() would have cleared it and left start() with
+	 * -ENODATA.
+	 */
+	zassert_true(audio_pipeline_is_running(&test_pipeline), "the refusal ended the thread");
+	zassert_equal(audio_pipeline_play(&test_pipeline), 0, "the refusal closed the chain");
+	zassert_equal(k_sem_take(&event_sem, TEST_EVENT_TIMEOUT), 0, "no EOF event");
+	zassert_equal(eof_events, 1, "the run after the refused init() never reached EOF");
+}
+
+ZTEST(audio_pipeline_lifecycle, test_stop_is_accepted_in_every_initialised_state)
+{
+	source_state.frames_total = AUDIO_FAKE_ENDLESS;
+	sink_state.frame_sem = &frame_sem;
+	sink_state.gate_sem = &gate_sem;
+	/* Fails before it pulls, so the second frame ends the run with an error
+	 * instead of data.
+	 */
+	sink_state.fail_at_frame = 2U;
+	sink_state.process_ret = -EIO;
+
+	/* Bound to a configuration and a sink, no worker thread. */
+	zassert_equal(audio_pipeline_stop(&test_pipeline), 0, "stop() before start() refused");
+	zassert_false(audio_pipeline_is_running(&test_pipeline), "stop() invented a thread");
+
+	/* Worker thread up, chain open, idle. */
+	zassert_equal(audio_pipeline_start(&test_pipeline), 0, "start failed");
+	zassert_equal(audio_pipeline_stop(&test_pipeline), 0, "stop() on an idle pipeline refused");
+	zassert_true(audio_pipeline_is_running(&test_pipeline), "stop() ended the thread");
+	zassert_false(audio_pipeline_is_playing(&test_pipeline), "stop() started playback");
+
+	/* Pulling frames: the sink is parked inside process() on the gate. */
+	zassert_equal(audio_pipeline_play(&test_pipeline), 0, "play failed");
+	zassert_equal(k_sem_take(&frame_sem, TEST_FRAME_TIMEOUT), 0, "no frame processed");
+	zassert_true(audio_pipeline_is_playing(&test_pipeline), "not playing");
+	zassert_equal(audio_pipeline_stop(&test_pipeline), 0, "stop() while playing refused");
+	zassert_false(audio_pipeline_is_playing(&test_pipeline), "still playing after stop()");
+
+	/* Chain torn down by a node error, worker thread still parked on it.
+	 * This is the state issue #17's three-state sketch has no name for: it
+	 * folds the error path into "no worker thread", which would make
+	 * audio_pipeline_is_running() start answering false here.
+	 */
+	k_sem_give(&gate_sem);
+	zassert_equal(audio_pipeline_play(&test_pipeline), 0, "replay before the error failed");
+	zassert_equal(k_sem_take(&event_sem, TEST_EVENT_TIMEOUT), 0, "no ERROR event");
+	zassert_equal(error_events, 1, "expected the scripted node error");
+
+	zassert_true(audio_pipeline_is_running(&test_pipeline), "the error ended the thread");
+	zassert_equal(audio_pipeline_play(&test_pipeline), -EPERM, "play() on a closed chain");
+	zassert_equal(audio_pipeline_stop(&test_pipeline), 0, "stop() after a node error refused");
+
+	/* The thread outlives all of it (spec §3.1), so init() stays refused
+	 * throughout - including here, where the chain is already closed.
+	 */
+	zassert_equal(audio_pipeline_init(&test_pipeline, &test_config, &test_sink), -EBUSY,
+		      "init() rebound a pipeline that still has a worker thread");
 }
 
 /* -------------------------------------------------------------------------

@@ -12,6 +12,7 @@
 
 #include <stdbool.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/types.h>
 
@@ -93,19 +94,39 @@ struct audio_pipeline {
 	/* Released whenever the worker must leave its idle wait. */
 	struct k_sem wake;
 
-	bool initialized;
-	/* Written by the worker thread on the error path, read by the control
-	 * thread, hence volatile - same for playing and quit.
+	/* The one lifecycle state of this instance. It replaces the five
+	 * booleans this struct used to carry - initialised, node chain open,
+	 * worker thread alive, worker pulling - so that the combinations which
+	 * were expressible but never reachable no longer exist: every one of
+	 * those facts is now a function of this single value, and every legal
+	 * move between values lives in one transition table in
+	 * audio_pipeline_core.c.
+	 *
+	 * The values are enum audio_pipeline_state, private to the subsystem
+	 * (subsys/audio/pipeline/audio_internal.h). Zero is "not initialised",
+	 * which is what makes a zeroed instance uninitialised by construction.
+	 * Read it from outside through audio_pipeline_is_running() and
+	 * audio_pipeline_is_playing().
+	 *
+	 * @c atomic_t rather than a volatile bool: the worker thread writes it
+	 * as well as the control thread, and @c volatile is neither a memory
+	 * barrier nor a Zephyr cross-thread primitive.
 	 */
-	volatile bool nodes_open;
-	/* Worker thread created and not yet returned; the worker clears it on
-	 * the way out so is_running() reflects real liveness.
+	atomic_t state;
+
+	/* Worker thread exit request, and deliberately *not* a state value.
+	 *
+	 * "Leave the loop" is a request rather than a place: it applies to
+	 * every state that holds a worker thread, so folding it into the state
+	 * would double the enum and reintroduce exactly the unreachable
+	 * combinations the state above removes. Keeping it apart is also what
+	 * lets the worker compare-and-swap its own moves without ever
+	 * overwriting a pending audio_pipeline_join().
+	 *
+	 * Set only by audio_pipeline_join(), cleared by audio_pipeline_init()
+	 * and by the audio_pipeline_start() that creates the thread.
 	 */
-	volatile bool running;
-	/* Worker thread is pulling frames. */
-	volatile bool playing;
-	/* Worker thread must return. */
-	volatile bool quit;
+	atomic_t quit_request;
 };
 
 /**

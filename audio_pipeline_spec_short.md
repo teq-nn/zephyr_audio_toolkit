@@ -137,9 +137,9 @@ int audio_pipeline_set_format(struct audio_pipeline *pl, const struct audio_stre
 
 int audio_pipeline_start(struct audio_pipeline *pl); /* -ENODATA if no format bound;
                                                         create thread, open() all nodes */
-int audio_pipeline_play(struct audio_pipeline *pl);  /* playing = true  */
-int audio_pipeline_stop(struct audio_pipeline *pl);  /* playing = false, thread idles */
-int audio_pipeline_join(struct audio_pipeline *pl);  /* optional: end the thread */
+int audio_pipeline_play(struct audio_pipeline *pl);  /* OPEN -> PLAYING */
+int audio_pipeline_stop(struct audio_pipeline *pl);  /* PLAYING -> OPEN, thread idles */
+int audio_pipeline_join(struct audio_pipeline *pl);  /* optional: end the thread, -> INIT */
 
 int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_event *evt,
                              k_timeout_t timeout);
@@ -151,7 +151,7 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 ## 7. EOF and errors (manifest §7/§8, spec §9)
 
 - **EOF**: the source reports `*out_size = 0` and returns `0`. Filters propagate it unchanged. The
-  sink detects it and tells the pipeline, which clears `playing` and emits
+  sink detects it and tells the pipeline, which moves `PLAYING` -> `OPEN` and emits
   `AUDIO_PIPELINE_EVENT_EOF`. Processing stops; **the thread keeps running** in idle mode.
 - **Error**: any negative return from `open()`, `process()`, or `close()`. `-EPIPE` is reserved for
   the pipeline's own end-of-stream signal, so no node may report it; the pull helper remaps it to

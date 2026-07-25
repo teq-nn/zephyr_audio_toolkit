@@ -2,6 +2,7 @@
 #define ZEPHYR_AUDIO_INTERNAL_H_
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 
 #include <zephyr/audio/audio_pipeline.h>
 
@@ -13,6 +14,49 @@
  * must not turn open/close into an endless loop.
  */
 #define AUDIO_PIPELINE_MAX_CHAIN_DEPTH 16
+
+/*
+ * The one lifecycle state of a pipeline instance (spec §8.2).
+ *
+ * Everything the control API used to keep in a separate boolean - initialised,
+ * node chain open, worker thread alive, worker pulling - is a function of this
+ * value, so a pipeline can no longer be playing without a thread or hold an
+ * open chain while uninitialised. The legal moves between the values live in
+ * exactly one place: the transition table in audio_pipeline_core.c.
+ *
+ *   UNINIT   Nothing bound yet. Zero, so a zero-initialised instance is
+ *            uninitialised by construction and every entry point refuses it
+ *            with -EINVAL.
+ *   INIT     Bound to a configuration and a sink. No worker thread, node chain
+ *            closed. This is also where audio_pipeline_join() leaves an
+ *            instance, which is why a joined pipeline can be started again.
+ *   OPEN     Worker thread alive, node chain open, not pulling frames.
+ *   PLAYING  Worker thread pulling frames.
+ *   CLOSED   Worker thread alive, node chain closed. Where a node error leaves
+ *            the pipeline: the worker tears the chain down and parks, and
+ *            audio_pipeline_start() reopens the chain onto the same thread
+ *            (spec §9.2).
+ *
+ * CLOSED is the one state issue #17's sketch does not name - it folds the node
+ * error path into Init. It cannot be Init: Init means "no worker thread", and
+ * spec §3.1 keeps the worker alive across a node error, which
+ * audio_pipeline_is_running() has always reported. Merging the two would
+ * change that public answer, so the state was added instead.
+ */
+enum audio_pipeline_state {
+	AUDIO_PIPELINE_STATE_UNINIT = 0,
+	AUDIO_PIPELINE_STATE_INIT,
+	AUDIO_PIPELINE_STATE_OPEN,
+	AUDIO_PIPELINE_STATE_PLAYING,
+	AUDIO_PIPELINE_STATE_CLOSED,
+};
+
+/* Read the lifecycle state of @p pipeline. */
+static inline enum audio_pipeline_state
+audio_pipeline_state_get(const struct audio_pipeline *pipeline)
+{
+	return (enum audio_pipeline_state)atomic_get(&pipeline->state);
+}
 
 /*
  * Map @p err onto a code that cannot be mistaken for end of stream, i.e. away

@@ -63,11 +63,11 @@ Sequence (simplified):
 
 ```text
 Pipeline thread:
-    while (playing) {
+    while (state == PLAYING) {
         frame = pull_frame_from_sink();
         if (frame_size == 0) {
             signal EOF;
-            playing = false;
+            state = OPEN;          /* §8.2: stop pulling, keep the chain */
         }
     }
 ```
@@ -86,15 +86,16 @@ sink -> filter -> filter -> source
 
 - The pipeline creates a **worker thread** via `k_thread_create` in `audio_pipeline_start()`.
 - This thread:
-  - loops frame processing while an internal `playing` flag is set,
+  - loops frame processing while the pipeline is in the `PLAYING` state (§8.2),
   - then idles/waits (thread stays alive),
-  - is only terminated by `audio_pipeline_stop()`/`audio_pipeline_join()`.
+  - is only terminated by `audio_pipeline_join()`. `audio_pipeline_stop()` halts the pulling and
+    leaves the thread alive, as §8.2, §9.1 and manifest §7 all require.
 
 ### 3.2 Timing model (v1)
 
 - In v1 there is **no explicit timer pacing** inside the pipeline.
 - The pipeline thread processes frames **as fast as possible** while:
-  - `playing == true`, and
+  - the pipeline is in the `PLAYING` state (§8.2), and
   - nodes still provide data.
 - Real-time sync (e.g., I2S output) is sink responsibility:
   - A hardware sink may block in `process()` or pace itself internally.
@@ -360,9 +361,18 @@ struct audio_pipeline {
     struct audio_pipeline_event *event_slots;
     size_t event_slot_count;
 
-    bool initialized;
-    bool running;
-    bool playing;
+    /* The one lifecycle state (§8.2), an enum audio_pipeline_state. Whether
+     * the instance is initialised, whether the node chain is open, whether a
+     * worker thread exists and whether it is pulling are all functions of it,
+     * so no two of them can disagree. atomic_t because the worker thread
+     * writes it too; a volatile bool is neither a barrier nor a Zephyr
+     * cross-thread primitive. */
+    atomic_t state;
+
+    /* Worker thread exit request, deliberately not a state value: it applies
+     * to every state that holds a thread, so folding it in would double the
+     * state space (§8.2). */
+    atomic_t quit_request;
 };
 ```
 
@@ -509,6 +519,53 @@ int audio_pipeline_stop(struct audio_pipeline *pl); /* stops playing */
 int audio_pipeline_join(struct audio_pipeline *pl); /* optional: wait for thread end */
 ```
 
+#### The lifecycle state
+
+The lifecycle is **one state value**, not a set of flags, and the legal moves between its values are
+written down in **one transition table** (`pipeline_transitions[]` in `audio_pipeline_core.c`). A
+move the table does not list is refused rather than stored, so a pipeline cannot be playing without
+a worker thread or hold an open node chain while uninitialised.
+
+| State     | Worker thread | Node chain | Pulling |
+| --------- | ------------- | ---------- | ------- |
+| `UNINIT`  | no            | closed     | no      |
+| `INIT`    | no            | closed     | no      |
+| `OPEN`    | yes           | open       | no      |
+| `PLAYING` | yes           | open       | yes     |
+| `CLOSED`  | yes           | closed     | no      |
+
+```
+                init()                start()               play()
+    UNINIT ------------> INIT ------------------> OPEN <------------- PLAYING
+                          ^                        |    ---stop()-->
+                          |                        |    <--- EOF ----
+              join()      |                        |
+    OPEN / PLAYING / CLOSED                        |
+                          ^                        v node error
+                          +---- join() ------- CLOSED
+                                                   | start() reopens the chain
+                                                   +--> OPEN
+```
+
+`UNINIT` is zero, which is what makes a zero-initialised instance uninitialised by construction.
+
+`CLOSED` is the state a **node error** leaves behind: the worker tears the chain down and parks, but
+it does **not** return (§3.1, §9.2). It is therefore distinct from `INIT`, which has no thread at
+all — `audio_pipeline_is_running()` answers `true` in `CLOSED` and `false` in `INIT`.
+`audio_pipeline_start()` reopens the chain onto the surviving thread, which is what makes recovery
+after an error cheaper than a full restart.
+
+The **worker exit request** is deliberately not a state. "Leave the loop" applies to every state
+that holds a thread, so folding it in would double the state space and reintroduce the unreachable
+combinations the single state removes. Keeping it apart is also what lets the worker
+compare-and-swap its own moves — end of stream, node error — without ever overwriting a pending
+`audio_pipeline_join()`.
+
+Every state move is a **compare-and-swap**, because the worker thread and the control thread both
+make them. When `audio_pipeline_stop()` and the worker's end-of-stream move land together, the
+loser re-reads and looks its move up again against the state that won, instead of silently undoing
+it.
+
 Recommended behavior:
 
 - `audio_pipeline_start()`:
@@ -521,13 +578,18 @@ Recommended behavior:
   - installs the bound format on each node (§4.1) and opens all nodes via `node->ops->open`. A node
     that cannot accept the format fails its open, which fails `start()` (§5.2).
 - `audio_pipeline_play()`:
-  - sets `pl->playing = true`,
-  - pipeline thread begins pulling frames.
+  - moves `OPEN` -> `PLAYING`, and the pipeline thread begins pulling frames,
+  - returns `-EPERM` from any state with no open chain under a live worker, i.e. from `INIT` and
+    from the `CLOSED` a node error leaves behind.
 - `audio_pipeline_stop()`:
-  - sets `pl->playing = false`,
-  - thread stays alive but idles/waits.
+  - moves `PLAYING` -> `OPEN`,
+  - thread stays alive but idles/waits,
+  - is legal in every initialised state, so it returns 0 on a pipeline that was not playing.
 - `audio_pipeline_join()`:
-  - optional: ends thread (cleanup scenarios),
+  - optional: ends thread (cleanup scenarios) and returns the instance to `INIT`, so a joined
+    pipeline can be started again,
+  - closes the node chain only if the state still says it is open: after a node error the worker
+    closed it already, and closing twice would call `close()` on every node a second time,
   - releases any built-in resource the instance holds (§6.1), after the closing errors have been
     published, so the next hand-rolled pipeline can claim it.
 
@@ -569,17 +631,21 @@ Behavior:
 - Filters propagate this state unchanged.
 - Sink detects EOF and informs the pipeline.
 - Pipeline:
-  - sets `playing = false`,
-  - generates `AUDIO_PIPELINE_EVENT_EOF`.
+  - moves `PLAYING` -> `OPEN` (§8.2): the pulling stops, the node chain stays open so the next
+    `audio_pipeline_play()` can run another track, and the worker thread stays alive,
+  - generates `AUDIO_PIPELINE_EVENT_EOF`, *after* the state move, so an observed EOF means the
+    transition has already happened.
 
 ### 9.2 Errors
 
 - Any negative return value from `open()`, `process()`, `close()` is an error.
 - `-EPIPE` is **reserved** for end of stream: `audio_pipeline_process_frame()` returns it when the sink reports `out_size == 0`, and the worker thread turns that into a clean EOF event. No node may report `-EPIPE` as a failure. `audio_node_pull()` (§4.1.1) enforces this on the upstream boundary; a node that talks to a filesystem remaps its own `-EPIPE` to `-EIO` the same way.
 - On the first error:
-  - pipeline stops further frame processing (`playing = false`),
-  - generates `AUDIO_PIPELINE_EVENT_ERROR`,
-  - optionally invokes `close()` on all nodes.
+  - pipeline stops further frame processing and closes the node chain, moving to the `CLOSED` state
+    (§8.2) - the worker thread survives, so `audio_pipeline_is_running()` still answers `true` and
+    `audio_pipeline_start()` can reopen the chain onto it,
+  - generates `AUDIO_PIPELINE_EVENT_ERROR`, *after* the chain is quiesced, so the pipeline is fully
+    stopped by the time the event is observed.
 
 ---
 

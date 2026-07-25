@@ -37,6 +37,8 @@
  * ======================================================================
  */
 
+#define TEST_EVENT_TIMEOUT K_MSEC(500)
+
 static void test_event_handler(const struct audio_pipeline_event *event, void *user_data)
 {
 	ARG_UNUSED(event);
@@ -97,6 +99,7 @@ ZTEST(audio_pipeline, test_pipeline_start_play_stop_join)
 		.event_user_data = NULL,
 	};
 	struct audio_pipeline pipeline = {0};
+	struct audio_pipeline_event evt;
 
 	zassert_true(audio_pipeline_config_is_valid(&cfg), "config must be valid");
 	zassert_equal(audio_pipeline_init(&pipeline, &cfg, &sink), 0, "init failed");
@@ -108,7 +111,14 @@ ZTEST(audio_pipeline, test_pipeline_start_play_stop_join)
 	 * the thread survives the EOF.
 	 */
 	zassert_equal(audio_pipeline_play(&pipeline), 0, "play failed");
-	k_msleep(20);
+
+	/* Wait for the event rather than for the clock. The worker leaves the
+	 * playing state before it publishes, so an EOF on the queue means the
+	 * transition is already done.
+	 */
+	zassert_equal(audio_pipeline_get_event(&pipeline, &evt, TEST_EVENT_TIMEOUT), 0,
+		      "no EOF event");
+	zassert_equal(evt.type, AUDIO_PIPELINE_EVENT_EOF, "expected an EOF event");
 	zassert_true(audio_pipeline_is_running(&pipeline), "EOF killed the worker thread");
 	zassert_false(audio_pipeline_is_playing(&pipeline), "still playing after EOF");
 
