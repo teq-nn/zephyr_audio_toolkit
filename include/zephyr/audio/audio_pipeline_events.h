@@ -1,8 +1,6 @@
 /*
  * Pipeline events: the queue-based poll API and the optional callback.
  *
- * See audio_pipeline_manifest.md §8 and audio_pipeline_spec_v2.md §3.3/§8.3.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -51,7 +49,7 @@ struct audio_pipeline;
 /**
  * @brief Fetch the next event from a pipeline's event queue.
  *
- * Plain @c k_msgq semantics (spec §3.3): the queue may be drained from any
+ * Plain @c k_msgq semantics: the queue may be drained from any
  * thread, events arrive in the order they were published, and @p timeout may
  * be @c K_NO_WAIT, @c K_FOREVER or any finite duration.
  *
@@ -60,7 +58,7 @@ struct audio_pipeline;
  * survive.
  *
  * An event is queued last, once the pipeline has finished reacting to it: on
- * the error path the node chain is already closed (spec §9.2) and any
+ * the error path the node chain is already closed and any
  * registered callback has already returned by the time this call hands the
  * event over.
  *

@@ -4,14 +4,14 @@
  *  - audio_pipeline: the argument/state guards of the control API plus a
  *    start/play/stop/join smoke test. These predate the file nodes and do not
  *    touch the filesystem.
- *  - audio_pipeline_negative: the negative test strategy of spec §12.3 driven
- *    end to end through the worker thread - a corrupt header aborting start(),
- *    a truncated file ending as a clean EOF, a simulated I/O error surfacing as
- *    an ERROR event, the reserved -EPIPE arriving as an -EIO ERROR whether it
- *    comes from a source below a filter or from the sink itself, and the two
- *    file-writer overflow guards (-EFBIG, -ENOSPC).
+ *  - audio_pipeline_negative: the negative paths driven end to end through the
+ *    worker thread - a corrupt header aborting start(), a truncated file ending
+ *    as a clean EOF, a simulated I/O error surfacing as an ERROR event, the
+ *    reserved -EPIPE arriving as an -EIO ERROR whether it comes from a source
+ *    below a filter or from the sink itself, and the two file-writer overflow
+ *    guards (-EFBIG, -ENOSPC).
  *
- * Everything runs headless on native_sim, without audio hardware (spec §12.1).
+ * Everything runs headless on native_sim, without audio hardware.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -137,8 +137,8 @@ ZTEST(audio_pipeline, test_sink_and_filter_without_upstream_report_enotsup)
 	};
 	size_t i;
 
-	/* Spec §4.3/§4.4: a filter and a sink have an upstream, so a missing one
-	 * is a wiring error - and the same one for every node, whoever wrote it.
+	/* A filter and a sink have an upstream, so a missing one is a wiring
+	 * error - and the same one for every node, whoever wrote it.
 	 * Reporting a clean EOF instead would swallow the track in silence.
 	 */
 	for (i = 0; i < ARRAY_SIZE(orphans); i++) {
@@ -159,7 +159,7 @@ ZTEST(audio_pipeline, test_sink_and_filter_without_upstream_report_enotsup)
 ZTEST_SUITE(audio_pipeline, NULL, NULL, NULL, NULL, NULL);
 
 /* =========================================================================
- * Suite 2: audio_pipeline_negative - spec §12.3 end to end.
+ * Suite 2: audio_pipeline_negative - the negative paths end to end.
  * ======================================================================
  */
 
@@ -339,7 +339,7 @@ ZTEST(audio_pipeline_negative, test_processing_error_emits_error_event_with_code
 
 	/* One good frame, then a filesystem-style failure. -EIO is what both file
 	 * nodes remap a stray -EPIPE to, so it is the natural stand-in for a disk
-	 * that stops accepting data mid-stream (spec §12.3).
+	 * that stops accepting data mid-stream.
 	 */
 	audio_fake_source_reset(&neg_fault_source_state);
 	neg_fault_source_state.frames_total = AUDIO_FAKE_ENDLESS;

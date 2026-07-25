@@ -2,36 +2,39 @@
 
 This repository houses an out-of-tree Zephyr module (`zephyr-audio-pipeline`) that provides a
 pull-based audio pipeline subsystem: sources, filters, and sinks chained behind a single worker
-thread, with static memory only. Architectural intent lives alongside the code so the module can
-evolve without drifting from the authored contract.
+thread, with static memory only.
 
-New here? Read `audio_pipeline_spec_short.md` first — it is the one-page digest of the contract.
+## Concepts
 
-## Layout
+A **pipeline** owns one worker thread and one frame buffer. Hanging off it is a chain of **nodes**,
+each with a role: a **source** produces samples, a **filter** transforms them, a **sink** consumes
+them.
 
-The tree follows the layout prescribed by manifest §12 and spec §14.
+The **sink** drives. It asks its upstream for a **frame** of samples, that node asks *its* upstream,
+and so on back to the source — so data is pulled through the chain, never pushed into it. Nothing is
+buffered between nodes and nothing is queued, which is what lets the whole pipeline share a single
+statically allocated frame buffer. Nodes are passive: they run only when the worker thread invokes
+them, one frame at a time, so none of them needs to be thread-safe.
 
-- `audio_pipeline_manifest.md` – the architectural contract; update it first when changing thread,
-  buffer, or role semantics.
-- `audio_pipeline_spec_v2.md` – the implementation blueprint (API shapes, Kconfig, EOF/error rules).
-- `audio_pipeline_spec_short.md` – the onboarding digest of the two documents above; refresh it
-  whenever the manifest or spec changes materially.
-- `AGENTS.md` – contributor and agent guidelines (structure, style, testing, review).
-- `zephyr/module.yml` – Zephyr module metadata; points the build at the root `CMakeLists.txt` and `Kconfig`. Zephyr only discovers modules via `zephyr/module.{yml,yaml}`, so this path is not optional.
-- `CMakeLists.txt` – module root; adds `subsys/audio/pipeline`.
-- `Kconfig` – module root menu; `rsource`s the subsystem Kconfig.
-- `include/zephyr/audio/` – public headers other Zephyr applications include:
-  `audio_format.h`, `audio_node.h`, `audio_nodes.h`, `audio_pipeline.h`, `audio_pipeline_events.h`,
-  `audio_wav.h` (reads *and* writes RIFF/WAVE headers; the only place that knows the byte layout).
-- `subsys/audio/pipeline/` – the implementation: `audio_pipeline_core.c`, `audio_pipeline_config.c`,
-  `audio_pipeline_events.c`, `audio_node_core.c`, `audio_wav.c`, the private `audio_internal.h`,
-  plus `nodes/` (file reader, file writer, gain filter, null sink).
-- `samples/audio/pipeline_basic/` – reference application (`CMakeLists.txt`, `Kconfig`, `src/main.c`).
-- `tests/subsys/audio/pipeline/` – Ztest suites (`test_roundtrip.c`, `test_error_paths.c`).
-- `tests/subsys/audio/wav/` – standalone WAV header unit test (`test_wav.c`), no pipeline needed.
+A source with nothing left reports **end of stream** — a success, not an error — and the worker goes
+idle without tearing anything down, ready to play another track on the same thread.
 
-Headers are installed under the `zephyr/audio/` namespace, so applications include them as
-`#include <zephyr/audio/audio_pipeline.h>`.
+Every sample travels in a 32-bit **container**, whatever its original resolution; a source widens
+what it reads on the way in and a sink narrows it on the way out.
+
+`CONTEXT.md` defines these terms precisely and is the vocabulary to use when writing code here.
+`docs/adr/` records why the design is shaped this way.
+
+## Where to start reading
+
+The public headers in `include/zephyr/audio/` are the specification — start with
+`audio_pipeline.h` for the lifecycle and `audio_node.h` for what a node must implement. Then read
+`samples/audio/pipeline_basic/src/main.c`, which builds a complete reader → gain → sink pipeline and
+is the shortest end-to-end example of the API. The Ztest suites under `tests/` are the executable
+contract for the behaviours the headers describe.
+
+There is deliberately no separate specification document: the code is the spec, and a prose copy of
+it would only drift. See `AGENTS.md` for the reasoning and for the contributor guidelines.
 
 ## Using the module
 
@@ -42,6 +45,12 @@ in one of two ways:
 - Point the build at it explicitly: `-DZEPHYR_EXTRA_MODULES=<abs path to this repo>`.
 
 Then enable it with `CONFIG_AUDIO_PIPELINE=y` in your application's `prj.conf`.
+
+Headers are installed under the `zephyr/audio/` namespace, so applications include them as
+`#include <zephyr/audio/audio_pipeline.h>`.
+
+Zephyr only discovers modules through `zephyr/module.{yml,yaml}`, so that path is not optional; it
+points the build at the root `CMakeLists.txt` and `Kconfig`.
 
 ## Build & Test
 
@@ -67,5 +76,4 @@ be dropped. Swap `-p native_sim` for `-p <BOARD>` when coverage must include dri
 ## Contributing
 
 Follow Zephyr's K&R style (tabs, snake_case, braces on the same line) and run `checkpatch.pl
---strict` before submitting patches that touch code. Keep the manifest, spec, and digest
-synchronized with any code change — see `AGENTS.md` for the full guidelines.
+--strict` before submitting patches that touch code. See `AGENTS.md` for the full guidelines.

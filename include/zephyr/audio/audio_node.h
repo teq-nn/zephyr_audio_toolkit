@@ -48,15 +48,15 @@ int audio_node_close(struct audio_node *node);
 /**
  * @brief Read one frame from @p node's upstream.
  *
- * The single implementation of the pull contract (spec §4.1.1): every filter
- * and every sink reads its upstream through this function, passing *itself* as
+ * The single implementation of the pull contract: every filter and every sink
+ * reads its upstream through this function, passing *itself* as
  * @p node. Nothing else may invoke an upstream node's process op, or the three
  * decisions below would drift apart again from node to node.
  *
  * It owns:
- *  - the wiring policy - a filter or a sink without an upstream (spec §4.3,
- *    §4.4) is a wiring error, reported as @c -ENOTSUP and never as an empty
- *    track, which would silently swallow the stream;
+ *  - the wiring policy - a filter or a sink without an upstream is a wiring
+ *    error, reported as @c -ENOTSUP and never as an empty track, which would
+ *    silently swallow the stream;
  *  - the reserved code - @c -EPIPE means "end of stream" to the pipeline, so a
  *    @c -EPIPE arriving from below is remapped to @c -EIO and a broken upstream
  *    can never reach the application looking like a finished one;

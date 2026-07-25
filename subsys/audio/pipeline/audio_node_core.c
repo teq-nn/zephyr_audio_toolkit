@@ -1,6 +1,6 @@
 /*
  * Node dispatch plus the one implementation of the pull contract every filter
- * and sink reads its upstream through (spec §4.1.1).
+ * and sink reads its upstream through.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -72,8 +72,8 @@ int audio_node_pull(struct audio_node *node, struct audio_buffer_view *buf,
 	*out_size = 0;
 
 	if (!node->upstream) {
-		/* Spec §4.3/§4.4: a filter and a sink have an upstream. A
-		 * missing one is a wiring error, not an empty track.
+		/* A filter and a sink have an upstream. A missing one is a
+		 * wiring error, not an empty track.
 		 */
 		LOG_ERR("pull from a node that has no upstream");
 		return -ENOTSUP;

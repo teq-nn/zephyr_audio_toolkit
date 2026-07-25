@@ -1,6 +1,6 @@
 /*
  * Event delivery: the per-instance k_msgq that audio_pipeline_get_event()
- * reads, plus the optional callback (spec §3.3/§8.3, manifest §8).
+ * reads, plus the optional callback.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -46,7 +46,7 @@ void audio_pipeline_publish_event(struct audio_pipeline *pipeline,
 	 * well have a higher priority than the publishing worker thread, so it
 	 * runs the moment the message lands. Publishing to the queue last is
 	 * what makes the event mean "the pipeline is done with this" - chain
-	 * quiesced on the error path (spec §9.2) and the callback already
+	 * quiesced on the error path and the callback already
 	 * invoked - instead of "the pipeline is halfway through publishing".
 	 */
 	if (pipeline->config && pipeline->config->event_cb) {

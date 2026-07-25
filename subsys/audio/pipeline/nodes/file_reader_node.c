@@ -4,8 +4,7 @@
  * open() opens the file through the Zephyr filesystem API, parses its
  * RIFF/WAVE header with the shared parser and seeks to the payload; process()
  * widens the 16 bit payload into the canonical S32_LE container and reports
- * end of data with out_size == 0; close() releases the handle
- * (manifest §2/§4/§7, spec §5.3/§10.1).
+ * end of data with out_size == 0; close() releases the handle.
  *
  * All state lives in the per-instance ::audio_file_reader_state allocated by
  * AUDIO_FILE_READER_NODE_DEFINE(), so several readers can run side by side.
@@ -33,7 +32,7 @@ LOG_MODULE_REGISTER(audio_file_reader, LOG_LEVEL_INF);
 #define FILE_READER_BITS_PER_SAMPLE 16U
 #define FILE_READER_BYTES_PER_SAMPLE (FILE_READER_BITS_PER_SAMPLE / 8U)
 
-/* Interleaving is pipeline-wide (spec §5.2); v1 is stereo, mono costs nothing. */
+/* Interleaving is pipeline-wide; v1 is stereo, mono costs nothing. */
 #define FILE_READER_MAX_CHANNELS 2U
 
 /* Drop the handle, leaving the node in a well-defined closed state. */
@@ -57,12 +56,12 @@ static int file_reader_release(struct audio_file_reader_state *state)
 /*
  * Widen @p samples little endian 16 bit samples sitting at the front of @p buf
  * into the S32_LE container the rest of the pipeline works with
- * (spec §5.3: s32 = s16 << 16).
+ * (s32 = s16 << 16).
  *
- * Done in place, back to front, so the node needs no scratch buffer at all
- * (manifest §6): sample i is read from byte offset 2*i and written to byte
- * offset 4*i, and 2*i <= 4*i for every i, so a write can never clobber a
- * sample that has not been read yet.
+ * Done in place, back to front, so the node needs no scratch buffer at all:
+ * sample i is read from byte offset 2*i and written to byte offset 4*i, and
+ * 2*i <= 4*i for every i, so a write can never clobber a sample that has not
+ * been read yet.
  */
 static void file_reader_widen_s16(int32_t *buf, size_t samples)
 {
@@ -152,7 +151,7 @@ static int file_reader_open(struct audio_node *node)
 	}
 
 	/* The container is always S32_LE; the on-disk depth survives as the
-	 * effective resolution (spec §5.2).
+	 * effective resolution.
 	 */
 	state->fmt.sample_rate_hz = wav.sample_rate_hz;
 	state->fmt.channels = (uint8_t)wav.channels;
@@ -221,7 +220,7 @@ static int file_reader_process(struct audio_node *node, struct audio_buffer_view
 	bytes = MIN(bytes, ROUND_DOWN((size_t)state->bytes_left, frame_bytes));
 
 	if (bytes == 0U) {
-		/* The declared payload is exhausted: EOF (manifest §7). */
+		/* The declared payload is exhausted: EOF. */
 		state->eof = true;
 		return 0;
 	}

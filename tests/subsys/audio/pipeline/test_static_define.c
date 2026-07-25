@@ -1,6 +1,5 @@
 /*
- * Static definition macros and multi-instance isolation
- * (manifest §6/§9, spec §6.2 and §11.2).
+ * Static definition macros and multi-instance isolation.
  *
  * Everything here is built from AUDIO_PIPELINE_DEFINE(), AUDIO_NODE_DEFINE()
  * and the per-node *_NODE_DEFINE() macros, so the suite fails if any of them

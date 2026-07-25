@@ -1,7 +1,6 @@
 /*
  * File writer sink node: header emission and finalisation, S32_LE -> S16
- * narrowing, EOF propagation and the filesystem error paths (manifest §4/§7,
- * spec §5.3/§10.2).
+ * narrowing, EOF propagation and the filesystem error paths.
  *
  * Every case writes a real file on the fixture filesystem and reads it back
  * through the shared RIFF/WAVE parser, so the node is judged by the bytes it
@@ -70,7 +69,7 @@ AUDIO_FILE_WRITER_NODE_DEFINE(orphan_writer, NULL, AUDIO_TEST_PATH("w_orphan.wav
 /* Never opened by any case, so process() has to refuse it. */
 AUDIO_FILE_WRITER_NODE_DEFINE(unopened_writer, &hdr_source, AUDIO_TEST_PATH("w_unopened.wav"));
 
-/* End to end: a real WAV in, a real WAV out (spec §12.2 in miniature). */
+/* End to end: a real WAV in, a real WAV out. */
 AUDIO_FILE_READER_NODE_DEFINE(pipe_reader, AUDIO_TEST_PATH("w_src.wav"));
 AUDIO_FILE_WRITER_NODE_DEFINE(pipe_writer, &pipe_reader, AUDIO_TEST_PATH("w_pipe.wav"));
 AUDIO_PIPELINE_DEFINE(writer_pipeline, WRITER_FRAME_SAMPLES,
@@ -419,7 +418,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_propagates_eof_without_appending)
 	zassert_equal(produced, 4U, "first frame is short");
 	zassert_equal(state->data_bytes, expected, "wrong payload length after one frame");
 
-	/* EOF is out_size == 0 with a successful return (manifest §7), and it
+	/* EOF is out_size == 0 with a successful return, and it
 	 * must stay that way however often the pipeline asks again.
 	 */
 	for (i = 0; i < 3U; i++) {
@@ -453,8 +452,8 @@ ZTEST(audio_pipeline_file_writer, test_sink_without_upstream_is_a_wiring_error)
 
 	zassert_equal(audio_node_open(&orphan_writer), 0, "open failed");
 
-	/* Spec §4.4: a sink has an upstream. A missing one is a wiring error,
-	 * and reporting it as a clean EOF would swallow the track silently.
+	/* A sink has an upstream. A missing one is a wiring error, and
+	 * reporting it as a clean EOF would swallow the track silently.
 	 */
 	ret = audio_node_process(&orphan_writer, &view, &produced);
 	zassert_equal(ret, -ENOTSUP, "a sink without upstream must report -ENOTSUP, got %d", ret);
@@ -508,7 +507,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_reports_write_error_and_leaves_empty
 
 	/* Pull the handle out from under the node: fs_write() on a closed file
 	 * object returns -EBADF, which is the cheapest deterministic stand-in
-	 * for a filesystem that stops accepting data (spec §12.3).
+	 * for a filesystem that stops accepting data.
 	 */
 	zassert_equal(fs_close(&state->file), 0, "could not close the handle behind the node");
 
@@ -620,7 +619,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_writes_file_driven_by_pipeline)
 	assert_valid_wav(AUDIO_TEST_PATH("w_pipe.wav"), 48000U, 2U,
 			 (uint32_t)(ARRAY_SIZE(payload) * sizeof(int16_t)));
 
-	/* S16 -> S32 -> S16 has to be the identity (spec §5.3). */
+	/* S16 -> S32 -> S16 has to be the identity. */
 	for (i = 0; i < ARRAY_SIZE(payload); i++) {
 		zassert_equal(payload_u16(i), (uint16_t)payload[i],
 			      "sample %zu came back as 0x%04x instead of 0x%04x", i,

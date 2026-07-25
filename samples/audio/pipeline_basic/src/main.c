@@ -4,8 +4,7 @@
  *
  * Nothing in the pipeline is hand-built - AUDIO_PIPELINE_DEFINE() owns the
  * worker thread, its stack and the frame buffer, and the *_NODE_DEFINE() macros
- * own the nodes plus their state and wire the chain at build time
- * (manifest §9, spec §6.2).
+ * own the nodes plus their state and wire the chain at build time.
  *
  * The sample is self-contained on native_sim: it formats an ext2 filesystem on
  * a RAM disk, generates a short 16 bit stereo track on it and plays that
@@ -70,7 +69,7 @@ static void print_event(const char *path, const struct audio_pipeline_event *eve
 }
 
 /*
- * Optional secondary path (spec §8.3). It runs on the thread that produced the
+ * Optional secondary path. It runs on the thread that produced the
  * event - the worker thread for EOF - so it only prints and returns; anything
  * that may block belongs on the control thread, behind the queue read in
  * main().
@@ -180,9 +179,7 @@ static const struct audio_pipeline_config cfg = {
 	.stream = {
 		.sample_rate_hz = TRACK_SAMPLE_RATE_HZ,
 		.channels = TRACK_CHANNELS,
-		/* The container is 32 bit, the track's resolution is 16
-		 * (spec §5.2).
-		 */
+		/* The container is 32 bit, the track's resolution is 16. */
 		.valid_bits_per_sample = TRACK_BITS_PER_SAMPLE,
 		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
 	},
@@ -223,7 +220,7 @@ void main(void)
 		printk("pipeline: play failed (%d)\n", ret);
 	}
 
-	/* Primary event path (spec §8.3): block on the pipeline's queue from
+	/* Primary event path: block on the pipeline's queue from
 	 * this control thread until the track is over. The worker thread stays
 	 * alive across EOF, so a second play() would render another track
 	 * without restarting anything.

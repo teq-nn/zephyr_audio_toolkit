@@ -1,6 +1,6 @@
 /*
  * The built-in stack, frame buffer and event slots a zero-initialised pipeline
- * falls back on (manifest §6/§8, spec §6.1/§8.1).
+ * falls back on.
  *
  * There is exactly one of each in the subsystem, so at most one hand-rolled
  * instance can hold them. This suite pins the claim/release protocol that makes

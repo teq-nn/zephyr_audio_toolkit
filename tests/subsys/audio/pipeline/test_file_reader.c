@@ -1,6 +1,6 @@
 /*
  * File reader source node: header validation, S16 -> S32_LE conversion,
- * partial final frames and EOF (manifest §4/§7, spec §5.3/§10.1).
+ * partial final frames and EOF.
  *
  * Every case runs against a real file on the fixture filesystem, so the node
  * is exercised through the Zephyr filesystem API rather than a mock.
@@ -53,7 +53,7 @@ static const int16_t known_samples[] = {
 	0, -1, 1, 32767, -32768, 0x1234, -0x1234, -256, 255, 0x7ffe, -0x7fff, 4,
 };
 
-/* spec §5.3: the container value is the 16 bit sample shifted up by 16. */
+/* The container value is the 16 bit sample shifted up by 16. */
 static int32_t expected_s32(int16_t sample)
 {
 	return (int32_t)((uint32_t)(int32_t)sample << 16);
@@ -139,7 +139,7 @@ ZTEST(audio_pipeline_file_reader, test_source_publishes_parsed_format)
 
 	zassert_equal(state->fmt.sample_rate_hz, 44100U, "sample rate not taken from the header");
 	zassert_equal(state->fmt.channels, 2U, "channel count not taken from the header");
-	/* The container is 32 bit, the resolution stays 16 (spec §5.2). */
+	/* The container is 32 bit, the resolution stays 16. */
 	zassert_equal(state->fmt.valid_bits_per_sample, 16U, "valid_bits_per_sample is wrong");
 	zassert_equal(state->fmt.format, AUDIO_SAMPLE_FORMAT_S32_LE, "container must be S32_LE");
 	zassert_false(state->eof, "a fresh reader must not start at EOF");
@@ -204,7 +204,7 @@ ZTEST(audio_pipeline_file_reader, test_source_reports_eof)
 	zassert_equal(audio_node_process(&pcm_reader, &view, &produced), 0, "process failed");
 	zassert_equal(produced, ARRAY_SIZE(buf), "first frame is short");
 
-	/* EOF is out_size == 0 with a *successful* return (manifest §7). */
+	/* EOF is out_size == 0 with a *successful* return. */
 	zassert_equal(audio_node_process(&pcm_reader, &view, &produced), 0, "EOF must return 0");
 	zassert_equal(produced, 0U, "EOF must report out_size == 0");
 	zassert_true(state->eof, "eof flag not latched");

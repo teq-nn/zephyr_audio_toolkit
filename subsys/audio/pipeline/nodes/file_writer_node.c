@@ -5,7 +5,7 @@
  * canonical 44 byte RIFF/WAVE header; process() pulls a frame from upstream,
  * narrows the canonical S32_LE container back to 16 bit PCM and appends it to
  * the data chunk; close() back-patches the two size fields so the file is a
- * valid WAV (manifest §2/§4/§7, spec §5.3/§10.2).
+ * valid WAV.
  *
  * Sizes are not known until the stream ends, so the header written by open()
  * declares an *empty* data chunk (RIFF size 36, data size 0) and the real sizes
@@ -41,7 +41,7 @@ LOG_MODULE_REGISTER(audio_file_writer, LOG_LEVEL_INF);
 #define FILE_WRITER_BITS_PER_SAMPLE 16U
 #define FILE_WRITER_BYTES_PER_SAMPLE (FILE_WRITER_BITS_PER_SAMPLE / 8U)
 
-/* Interleaving is pipeline-wide (spec §5.2); v1 is stereo, mono costs nothing. */
+/* Interleaving is pipeline-wide; v1 is stereo, mono costs nothing. */
 #define FILE_WRITER_MAX_CHANNELS 2U
 
 /* Applied to every zero field of the caller's format, so a writer defined with
@@ -184,7 +184,7 @@ static int file_writer_release(struct audio_file_writer_state *state)
 
 /*
  * Narrow @p count canonical S32_LE container samples to little endian 16 bit
- * PCM (spec §5.3: the inverse of the source's s32 = s16 << 16).
+ * PCM (the inverse of the source's s32 = s16 << 16).
  *
  * The rule is a plain arithmetic shift down by 16, i.e. the top 16 bits of the
  * container are kept:
@@ -234,7 +234,7 @@ static int file_writer_open(struct audio_node *node)
 	(void)file_writer_release(state);
 
 	/* Resolve the defaults in place, so the format the node actually wrote
-	 * stays observable after open() (spec §5.2).
+	 * stays observable after open().
 	 */
 	if (state->fmt.sample_rate_hz == 0U) {
 		state->fmt.sample_rate_hz = FILE_WRITER_DEFAULT_RATE_HZ;
@@ -334,7 +334,7 @@ static int file_writer_process(struct audio_node *node, struct audio_buffer_view
 	}
 
 	if (produced == 0U) {
-		/* End of stream (manifest §7): nothing to append. Finalise here
+		/* End of stream: nothing to append. Finalise here
 		 * as well as in close(), so an application that waits for the
 		 * EOF event already has a valid file in hand.
 		 */
@@ -379,7 +379,7 @@ static int file_writer_process(struct audio_node *node, struct audio_buffer_view
 	}
 
 	/* The sink consumed the frame; the pipeline only cares that it was not
-	 * empty (spec §4.4).
+	 * empty.
 	 */
 	*out_size = produced;
 

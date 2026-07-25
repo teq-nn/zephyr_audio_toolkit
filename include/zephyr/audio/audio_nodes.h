@@ -1,6 +1,5 @@
 /*
- * Static definition macros for the nodes shipped with the subsystem
- * (manifest §9, spec §11.2).
+ * Static definition macros for the nodes shipped with the subsystem.
  *
  * Every macro allocates the node's private state itself, so an application
  * never passes buffer pointers and two instances of the same node type can
@@ -46,7 +45,7 @@ struct audio_file_reader_state {
 	/**
 	 * Format the node delivers: the container is always
 	 * ::AUDIO_SAMPLE_FORMAT_S32_LE, while @c valid_bits_per_sample carries
-	 * the on-disk resolution of the WAV payload (spec §5.2/§5.3).
+	 * the on-disk resolution of the WAV payload.
 	 * Populated by open() from the parsed header.
 	 */
 	struct audio_stream_config fmt;
@@ -75,7 +74,7 @@ struct audio_file_writer_state {
 	 *
 	 * The container field describes the *pipeline* side and is always
 	 * ::AUDIO_SAMPLE_FORMAT_S32_LE; @c valid_bits_per_sample is the on-disk
-	 * resolution and v1 supports 16 only (spec §5.2/§5.3). Set it before
+	 * resolution and v1 supports 16 only. Set it before
 	 * open(); the node does not look at it again afterwards.
 	 */
 	struct audio_stream_config fmt;

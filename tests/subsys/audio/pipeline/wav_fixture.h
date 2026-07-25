@@ -1,7 +1,7 @@
 /*
  * Test fixture: a writable filesystem on native_sim plus a RIFF/WAVE file
  * generator, so the file nodes can be exercised against real files
- * (spec §12.1 - everything has to run headless, without audio hardware).
+ * (everything has to run headless, without audio hardware).
  *
  * The filesystem is ext2 on a RAM disk. Both are in-tree Zephyr code, so the
  * suite needs no extra west module: FAT would pull in `fatfs` and littlefs the

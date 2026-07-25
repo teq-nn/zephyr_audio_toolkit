@@ -16,7 +16,7 @@
 
 /*
  * Map @p err onto a code that cannot be mistaken for end of stream, i.e. away
- * from -EPIPE (manifest §7, spec §9.2).
+ * from -EPIPE.
  *
  * -EPIPE is how audio_pipeline_process_frame() tells the worker thread that the
  * stream ended, so a failure carrying it would reach the application as a clean

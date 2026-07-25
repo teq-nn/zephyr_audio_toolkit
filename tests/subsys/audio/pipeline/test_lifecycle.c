@@ -1,10 +1,9 @@
 /*
- * Lifecycle tests for the pipeline worker thread (spec §8.2 / §9,
- * manifest §3 and §7).
+ * Lifecycle tests for the pipeline worker thread.
  *
  * The chain under test is always source -> filter -> sink, built from the
  * shared fake nodes (fake_nodes.h) so the suite runs on native_sim without
- * audio hardware (spec §12.1).
+ * audio hardware.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -259,7 +258,7 @@ ZTEST(audio_pipeline_lifecycle, test_replay_after_eof)
 	zassert_equal(k_sem_take(&event_sem, TEST_EVENT_TIMEOUT), 0, "no EOF event");
 	zassert_equal(eof_events, 1, "expected first EOF");
 
-	/* Second track on the very same thread (manifest §3). */
+	/* Second track on the very same thread. */
 	audio_fake_source_rewind(&source_state);
 
 	zassert_equal(audio_pipeline_play(&test_pipeline), 0, "replay failed");

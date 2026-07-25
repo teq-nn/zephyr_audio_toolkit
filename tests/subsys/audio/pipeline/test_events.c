@@ -1,6 +1,5 @@
 /*
- * Queue-based event delivery: audio_pipeline_get_event() (spec §3.3 and §8.3,
- * manifest §8).
+ * Queue-based event delivery: audio_pipeline_get_event().
  *
  * The suite drives the four publishing sites of the subsystem - start() open
  * failure, worker EOF, worker error and join() close failure - and reads the
@@ -152,7 +151,7 @@ ZTEST(audio_pipeline_events, test_get_event_no_wait_reports_empty_queue)
 	struct audio_pipeline_event event;
 
 	/* K_NO_WAIT on an empty queue is the k_msgq "returned without waiting"
-	 * case, so the caller can poll without blocking (spec §3.3).
+	 * case, so the caller can poll without blocking.
 	 */
 	zassert_equal(audio_pipeline_get_event(&test_pipeline, &event, K_NO_WAIT), -ENOMSG,
 		      "empty queue did not report -ENOMSG");
@@ -198,7 +197,7 @@ ZTEST(audio_pipeline_events, test_eof_event_is_readable_from_a_third_thread)
 	source_state.frames_total = 2U;
 
 	/* The consumer is neither the publishing worker nor the control thread
-	 * that started the pipeline (spec §3.3).
+	 * that started the pipeline.
 	 */
 	k_thread_create(&reader_thread, reader_stack, K_THREAD_STACK_SIZEOF(reader_stack),
 			reader_entry, &test_pipeline, NULL, NULL, K_PRIO_PREEMPT(0), 0, K_NO_WAIT);
@@ -229,7 +228,7 @@ ZTEST(audio_pipeline_events, test_error_event_arrives_after_the_chain_is_quiesce
 	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_ERROR, "expected an ERROR event");
 	zassert_equal(event.err, -EIO, "wrong error code on the queue");
 
-	/* Ordering contract (spec §9.2): the nodes are closed before the event
+	/* Ordering contract: the nodes are closed before the event
 	 * becomes observable, so the application sees a quiesced pipeline.
 	 */
 	zassert_equal(atomic_get(&sink_state.close_calls), 1,

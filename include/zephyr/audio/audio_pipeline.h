@@ -1,9 +1,6 @@
 /*
  * Pull-based audio pipeline: public control API.
  *
- * See audio_pipeline_manifest.md §3/§7 and audio_pipeline_spec_v2.md §8.2/§9
- * for the binding lifecycle semantics implemented here.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -105,9 +102,8 @@ struct audio_pipeline {
  *    ::AUDIO_PIPELINE_EVENT_QUEUE_DEPTH events,
  *
  * and ties them together, so two definitions never share storage and their
- * worker threads can run concurrently and raise events independently
- * (manifest §6/§8/§9, spec §6.2). The subsystem allocates nothing on top of
- * that and never calls @c k_malloc.
+ * worker threads can run concurrently and raise events independently. The
+ * subsystem allocates nothing on top of that and never calls @c k_malloc.
  *
  * The instance still has to be bound to a configuration and a sink with
  * audio_pipeline_init(); pass a configuration whose @c frame_samples equals
@@ -178,8 +174,8 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
  * to begin pulling frames.
  *
  * Idempotent: calling it on a started pipeline with an open chain returns 0.
- * After the error path closed the chain (spec §9.2) another start() reopens it
- * and reuses the existing thread.
+ * After the error path closed the chain, another start() reopens it and
+ * reuses the existing thread.
  *
  * An instance running on the built-in resources reclaims them here, because
  * audio_pipeline_join() released them. No ERROR event is published if that
@@ -207,9 +203,9 @@ int audio_pipeline_play(struct audio_pipeline *pipeline);
  * @brief Halt frame pulling; the worker thread stays alive and idles.
  *
  * Asynchronous by design: the worker may still complete the frame in flight,
- * because a sink is allowed to block inside process() (spec §3.2) and stop()
- * must not deadlock behind it. Nodes stay open, so audio_pipeline_play() can
- * resume on the same thread.
+ * because a sink is allowed to block inside process() and stop() must not
+ * deadlock behind it. Nodes stay open, so audio_pipeline_play() can resume on
+ * the same thread.
  *
  * @retval 0 on success
  * @retval -EINVAL if the pipeline was not initialised

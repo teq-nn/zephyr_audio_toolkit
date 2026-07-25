@@ -1,5 +1,5 @@
 /*
- * Roundtrip test suite (spec §12.2): a golden WAV file on a RAM filesystem is
+ * Roundtrip test suite: a golden WAV file on a RAM filesystem is
  * pushed through file_reader -> [optional gain filter] -> file_writer until the
  * pipeline reports EOF, then the output file is compared against the golden
  * master. A unity-gain run must reproduce the master byte for byte; a
@@ -7,7 +7,7 @@
  * demonstrably transformed, which is what stops a silent pass-through pipeline
  * from faking the roundtrip.
  *
- * Everything runs headless on native_sim, without audio hardware (spec §12.1).
+ * Everything runs headless on native_sim, without audio hardware.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -140,7 +140,7 @@ static void roundtrip_before(void *fixture)
 }
 
 /* -------------------------------------------------------------------------
- * spec §12.2: byte-for-byte roundtrip
+ * Byte-for-byte roundtrip
  * ----------------------------------------------------------------------
  */
 

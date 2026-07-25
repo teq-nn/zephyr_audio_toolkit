@@ -17,7 +17,7 @@ static int null_sink_process(struct audio_node *node, struct audio_buffer_view *
 		return -EINVAL;
 	}
 
-	/* The whole node: pull a frame and drop it (spec §4.1.1). */
+	/* The whole node: pull a frame and drop it. */
 	return audio_node_pull(node, buf, out_size);
 }
 

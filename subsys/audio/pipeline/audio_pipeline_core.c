@@ -1,6 +1,6 @@
 /*
  * Pipeline lifecycle: worker thread, node open/close ordering, EOF and error
- * handling (spec §8.2 and §9, manifest §3 and §7).
+ * handling.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -217,7 +217,7 @@ static int pipeline_open_nodes(struct audio_pipeline *pipeline)
 
 /*
  * The worker outlives EOF, stop() and node errors; only audio_pipeline_join()
- * makes it return (manifest §3, spec §3.1).
+ * makes it return.
  */
 static void pipeline_thread(void *p1, void *p2, void *p3)
 {
@@ -443,7 +443,7 @@ int audio_pipeline_process_frame(struct audio_pipeline *pipeline)
 	if (ret < 0) {
 		/* Only an empty frame ends the stream, never a failing sink:
 		 * -EPIPE is this function's own EOF signal, so a sink reporting
-		 * it would be read as a finished track (manifest §7).
+		 * it would be read as a finished track.
 		 */
 		return audio_eof_safe_errno(ret);
 	}
