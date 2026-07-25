@@ -37,16 +37,34 @@ sink -> filter -> ... -> filter -> source
 All three implement the same "opc" op set (spec §4.1):
 
 ```c
+struct audio_buffer_view {
+    int32_t *data;     /* frame buffer, owned by the pipeline */
+    size_t   capacity; /* samples the buffer can hold */
+};
+
 struct audio_node_ops {
-    int     (*open)(struct audio_node *node);
-    ssize_t (*process)(struct audio_node *node, int32_t *buf,
-                       size_t capacity /* samples */, size_t *out_size /* samples */);
-    int     (*close)(struct audio_node *node);
+    int (*open)(struct audio_node *node);
+    int (*process)(struct audio_node *node, struct audio_buffer_view *buf,
+                   size_t *out_size /* samples */);
+    int (*close)(struct audio_node *node);
 };
 ```
 
-`open()`/`close()` return Zephyr error codes (`0` ok, `< 0` failure). `process()` returns the sample
-count produced (mirrored in `*out_size`) or a negative error code.
+All three return Zephyr error codes (`0` ok, `< 0` failure). `process()` reports the sample count it
+produced in `*out_size` — the only place a frame size is ever written — and `0` there means end of
+stream.
+
+Filters and sinks never call an upstream node's `process` op themselves; they read it through the one
+pull helper (spec §4.1.1):
+
+```c
+int audio_node_pull(struct audio_node *node, struct audio_buffer_view *buf, size_t *out_size);
+```
+
+It returns `-ENOTSUP` when the node has no upstream (a wiring error, not an empty track), forwards
+end of stream verbatim, and remaps a `-EPIPE` coming from below to `-EIO` so a broken upstream can
+never look like a finished one. Nodes still choose *when* and *how often* to pull, which is what
+keeps spec §13's resampler and mixer possible.
 
 ## 3. Threading (manifest §3, spec §3)
 
@@ -84,8 +102,15 @@ struct audio_format {
   per-cycle workload. One `process()` call per node per frame.
 - The pipeline owns one static shared frame buffer; nodes may hold their own static scratch buffers.
 - `AUDIO_PIPELINE_DEFINE()` instantiates the pipeline struct, its thread stack
-  (`K_THREAD_STACK_DEFINE`), and the frame buffer. `*_NODE_DEFINE()` macros do the same for nodes and
-  their contexts. Users never supply buffer pointers.
+  (`K_THREAD_STACK_DEFINE`), the frame buffer, and the event slots — all per instance, so two
+  macro-defined pipelines share nothing. `*_NODE_DEFINE()` macros do the same for nodes and their
+  contexts. Users never supply buffer pointers.
+- A zero-initialised (hand-rolled) instance instead falls back on the subsystem's single built-in
+  stack, frame buffer and event slots. Those are **owned, not shared**: `init()` claims them and
+  gives a second claimant `-EBUSY`, `join()` releases them, `start()` reclaims them (also `-EBUSY`
+  if they were taken meanwhile). Need two pipelines at once? Use `AUDIO_PIPELINE_DEFINE()` for at
+  least one of them. Join such an instance before discarding it — that is the only release — and do
+  not pull frames or read events on it between the join and the next successful init/start.
 
 ## 6. Lifecycle and API (spec §8)
 
@@ -113,9 +138,10 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 - **EOF**: the source reports `*out_size = 0` and returns `0`. Filters propagate it unchanged. The
   sink detects it and tells the pipeline, which clears `playing` and emits
   `AUDIO_PIPELINE_EVENT_EOF`. Processing stops; **the thread keeps running** in idle mode.
-- **Error**: any negative return from `open()`, `process()`, or `close()`. On the first error the
-  pipeline stops frame processing, emits `AUDIO_PIPELINE_EVENT_ERROR` with the error code, and may
-  `close()` all nodes.
+- **Error**: any negative return from `open()`, `process()`, or `close()`. `-EPIPE` is reserved for
+  the pipeline's own end-of-stream signal, so no node may report it; the pull helper remaps it to
+  `-EIO`. On the first error the pipeline stops frame processing, emits
+  `AUDIO_PIPELINE_EVENT_ERROR` with the error code, and may `close()` all nodes.
 - Event types: `AUDIO_PIPELINE_EVENT_EOF`, `AUDIO_PIPELINE_EVENT_ERROR`,
   `AUDIO_PIPELINE_EVENT_RECONFIG`, delivered via an internal `k_msgq` (optionally via callback).
 
@@ -134,20 +160,22 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 - Roundtrip: mount a golden-master WAV, run `file_reader → [filter] → file_writer` to EOF, compare
   the output byte-for-byte.
 - Negative paths: corrupted WAV header makes `open()` fail; early EOF still yields a clean EOF event;
-  simulated I/O errors yield an ERROR event.
+  simulated I/O errors yield an ERROR event; a second hand-rolled pipeline asking for the built-in
+  resources gets `-EBUSY` while the first one keeps running.
 
 ## 10. Layout (manifest §12, spec §14)
 
 ```text
 zephyr-audio-pipeline/
 ├─ module.yml, CMakeLists.txt, Kconfig      # Zephyr out-of-tree module glue
-├─ include/zephyr/audio/                    # audio_format.h, audio_node.h,
-│                                           # audio_pipeline.h, audio_pipeline_events.h
-├─ subsys/audio/pipeline/                   # core, config, events, node core, audio_internal.h
-│  ├─ nodes/                                # file_reader, file_writer, gain_filter, null_sink
-│  └─ util/                                 # wav_parser
+├─ include/zephyr/audio/                    # audio_format.h, audio_node.h, audio_pipeline.h,
+│                                           # audio_pipeline_events.h, audio_wav.h
+├─ subsys/audio/pipeline/                   # core, config, events, node core, audio_internal.h,
+│  │                                        # audio_wav.c (RIFF/WAVE header read + write)
+│  └─ nodes/                                # file_reader, file_writer, gain_filter, null_sink
 ├─ samples/audio/pipeline_basic/            # CMakeLists.txt, Kconfig, src/main.c
-└─ tests/subsys/audio/pipeline/             # test_roundtrip.c, test_error_paths.c
+├─ tests/subsys/audio/pipeline/             # test_roundtrip.c, test_error_paths.c
+└─ tests/subsys/audio/wav/                  # test_wav.c, standalone header unit test
 ```
 
 ## 11. Out of scope for v1 (spec §1.3, §13)

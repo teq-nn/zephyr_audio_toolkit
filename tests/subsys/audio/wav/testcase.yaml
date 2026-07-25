@@ -1,5 +1,5 @@
 tests:
-  audio.pipeline.wav_parser:
+  audio.pipeline.wav:
     tags:
       - audio
       - audio_pipeline

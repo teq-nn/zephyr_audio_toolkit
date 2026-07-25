@@ -7,7 +7,9 @@
  *  - audio_pipeline_negative: the negative test strategy of spec §12.3 driven
  *    end to end through the worker thread - a corrupt header aborting start(),
  *    a truncated file ending as a clean EOF, a simulated I/O error surfacing as
- *    an ERROR event, and the two file-writer overflow guards (-EFBIG, -ENOSPC).
+ *    an ERROR event, the reserved -EPIPE arriving as an -EIO ERROR whether it
+ *    comes from a source below a filter or from the sink itself, and the two
+ *    file-writer overflow guards (-EFBIG, -ENOSPC).
  *
  * Everything runs headless on native_sim, without audio hardware (spec §12.1).
  *
@@ -15,9 +17,7 @@
  */
 
 #include <errno.h>
-#include <string.h>
 
-#include <zephyr/fs/fs.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
@@ -27,9 +27,10 @@
 #include <zephyr/audio/audio_nodes.h>
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
+#include <zephyr/audio/audio_wav.h>
 
+#include "fake_nodes.h"
 #include "wav_fixture.h"
-#include "wav_parser.h"
 
 /* =========================================================================
  * Suite 1: audio_pipeline - control API guards and a lifecycle smoke test.
@@ -71,10 +72,17 @@ ZTEST(audio_pipeline, test_lifecycle_rejects_uninitialised_pipeline)
 
 ZTEST(audio_pipeline, test_pipeline_start_play_stop_join)
 {
+	struct audio_fake_source source_state = { .frames_total = 0U };
+	struct audio_node source = {
+		.role = AUDIO_NODE_ROLE_SOURCE,
+		.ops = &audio_fake_source_ops,
+		.upstream = NULL,
+		.state = &source_state,
+	};
 	struct audio_node sink = {
 		.role = AUDIO_NODE_ROLE_SINK,
 		.ops = &null_sink_node_ops,
-		.upstream = NULL,
+		.upstream = &source,
 		.state = NULL,
 	};
 	struct audio_pipeline_config cfg = {
@@ -95,7 +103,9 @@ ZTEST(audio_pipeline, test_pipeline_start_play_stop_join)
 	zassert_equal(audio_pipeline_start(&pipeline), 0, "start failed");
 	zassert_true(audio_pipeline_is_running(&pipeline), "worker thread missing");
 
-	/* A sink without upstream reports EOF right away; the thread survives. */
+	/* A source scripted to zero frames ends the stream on the first pull;
+	 * the thread survives the EOF.
+	 */
 	zassert_equal(audio_pipeline_play(&pipeline), 0, "play failed");
 	k_msleep(20);
 	zassert_true(audio_pipeline_is_running(&pipeline), "EOF killed the worker thread");
@@ -104,6 +114,46 @@ ZTEST(audio_pipeline, test_pipeline_start_play_stop_join)
 	zassert_equal(audio_pipeline_stop(&pipeline), 0, "stop failed");
 	zassert_equal(audio_pipeline_join(&pipeline), 0, "join failed");
 	zassert_false(audio_pipeline_is_running(&pipeline), "worker thread still running");
+}
+
+/* One of each shape that reads from upstream - a shipped sink, a shipped filter
+ * and the shared test fake - all wired without one.
+ */
+AUDIO_NULL_SINK_NODE_DEFINE(orphan_null_sink, NULL);
+AUDIO_GAIN_FILTER_NODE_DEFINE(orphan_gain_filter, NULL, AUDIO_GAIN_UNITY_Q15);
+AUDIO_FAKE_SINK_DEFINE(orphan_fake_sink, NULL);
+
+ZTEST(audio_pipeline, test_sink_and_filter_without_upstream_report_enotsup)
+{
+	struct audio_node *const orphans[] = {
+		&orphan_null_sink,
+		&orphan_gain_filter,
+		&orphan_fake_sink,
+	};
+	int32_t buf[8];
+	struct audio_buffer_view view = {
+		.data = buf,
+		.capacity = ARRAY_SIZE(buf),
+	};
+	size_t i;
+
+	/* Spec §4.3/§4.4: a filter and a sink have an upstream, so a missing one
+	 * is a wiring error - and the same one for every node, whoever wrote it.
+	 * Reporting a clean EOF instead would swallow the track in silence.
+	 */
+	for (i = 0; i < ARRAY_SIZE(orphans); i++) {
+		size_t produced = 1;
+		int ret;
+
+		zassert_equal(audio_node_open(orphans[i]), 0, "node %zu: open failed", i);
+
+		ret = audio_node_process(orphans[i], &view, &produced);
+		zassert_equal(ret, -ENOTSUP, "node %zu: expected -ENOTSUP without upstream, got %d",
+			      i, ret);
+		zassert_equal(produced, 0U, "node %zu: a failing process() claimed samples", i);
+
+		zassert_equal(audio_node_close(orphans[i]), 0, "node %zu: close failed", i);
+	}
 }
 
 ZTEST_SUITE(audio_pipeline, NULL, NULL, NULL, NULL, NULL);
@@ -127,95 +177,6 @@ static const struct audio_pipeline_config neg_config = {
 	.event_user_data = NULL,
 };
 
-/* -------------------------------------------------------------------------
- * A source that hands out a few good frames and then fails, so a filesystem
- * I/O error mid-stream can be simulated deterministically without depending on
- * the timing of a real disk fault.
- * ----------------------------------------------------------------------
- */
-
-struct fault_source_state {
-	size_t good_frames; /* frames to deliver before failing */
-	size_t done;
-	int fail_ret; /* returned once good_frames have been delivered */
-};
-
-static int fault_source_open(struct audio_node *node)
-{
-	struct fault_source_state *state = node->state;
-
-	state->done = 0;
-
-	return 0;
-}
-
-static int fault_source_process(struct audio_node *node, struct audio_buffer_view *buf,
-				size_t *out_size)
-{
-	struct fault_source_state *state = node->state;
-
-	if (state->done >= state->good_frames) {
-		return state->fail_ret;
-	}
-
-	/* A whole stereo frame of silence - the values do not matter here. */
-	memset(buf->data, 0, buf->capacity * sizeof(int32_t));
-	buf->size = buf->capacity;
-	*out_size = buf->capacity;
-	state->done++;
-
-	return 0;
-}
-
-static int fault_source_close(struct audio_node *node)
-{
-	ARG_UNUSED(node);
-
-	return 0;
-}
-
-static const struct audio_node_ops fault_source_ops = {
-	.open = fault_source_open,
-	.process = fault_source_process,
-	.close = fault_source_close,
-};
-
-#define FAULT_SOURCE_DEFINE(_name)                                                          \
-	static struct fault_source_state _name##_state;                                     \
-	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &fault_source_ops, NULL,           \
-			  &_name##_state)
-
-/* A source that produces exactly one stereo frame, for the -EFBIG guard. */
-static int one_frame_open(struct audio_node *node)
-{
-	ARG_UNUSED(node);
-
-	return 0;
-}
-
-static int one_frame_process(struct audio_node *node, struct audio_buffer_view *buf,
-			     size_t *out_size)
-{
-	size_t n = MIN((size_t)2, buf->capacity);
-
-	ARG_UNUSED(node);
-
-	memset(buf->data, 0, n * sizeof(int32_t));
-	buf->size = n;
-	*out_size = n;
-
-	return 0;
-}
-
-static const struct audio_node_ops one_frame_ops = {
-	.open = one_frame_open,
-	.process = one_frame_process,
-	.close = fault_source_close,
-};
-
-#define ONE_FRAME_SOURCE_DEFINE(_name) \
-	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &one_frame_ops, NULL, NULL)
-
 /* Corrupt header -> reader open() fails -> ERROR. */
 AUDIO_FILE_READER_NODE_DEFINE(neg_bad_reader, AUDIO_TEST_PATH("neg_bad.wav"));
 AUDIO_FILE_WRITER_NODE_DEFINE(neg_bad_writer, &neg_bad_reader, AUDIO_TEST_PATH("neg_bad_out.wav"));
@@ -229,15 +190,39 @@ AUDIO_FILE_WRITER_NODE_DEFINE(neg_trunc_writer, &neg_trunc_reader,
 AUDIO_PIPELINE_DEFINE(neg_trunc_pipeline, NEG_FRAME_SAMPLES,
 		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
 
-/* Simulated I/O error mid-stream -> ERROR carrying the code. */
-FAULT_SOURCE_DEFINE(neg_fault_source);
+/* Simulated I/O error mid-stream -> ERROR carrying the code. The shared fake
+ * source delivers a few good frames and then fails, so the fault lands at a
+ * fixed frame instead of depending on the timing of a real disk error.
+ */
+AUDIO_FAKE_SOURCE_DEFINE(neg_fault_source);
 AUDIO_FILE_WRITER_NODE_DEFINE(neg_fault_writer, &neg_fault_source,
 			      AUDIO_TEST_PATH("neg_fault_out.wav"));
 AUDIO_PIPELINE_DEFINE(neg_fault_pipeline, NEG_FRAME_SAMPLES,
 		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
 
-/* -EFBIG guard: one frame past a data chunk that is already at the 32 bit ceiling. */
-ONE_FRAME_SOURCE_DEFINE(neg_efbig_source);
+/* A source failing with the reserved EOF code, seen through a filter: neither
+ * the filter nor the sink may pass -EPIPE on, or the application would be told
+ * the track finished cleanly.
+ */
+AUDIO_FAKE_SOURCE_DEFINE(neg_epipe_source);
+AUDIO_GAIN_FILTER_NODE_DEFINE(neg_epipe_filter, &neg_epipe_source, AUDIO_GAIN_UNITY_Q15);
+AUDIO_NULL_SINK_NODE_DEFINE(neg_epipe_sink, &neg_epipe_filter);
+AUDIO_PIPELINE_DEFINE(neg_epipe_pipeline, NEG_FRAME_SAMPLES,
+		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
+
+/* The same reserved code, one level further down the chain: a sink failing with
+ * -EPIPE in its own body, where no pull can intercept it.
+ */
+AUDIO_FAKE_SOURCE_DEFINE(neg_sink_epipe_source);
+AUDIO_FAKE_SINK_DEFINE(neg_sink_epipe_sink, &neg_sink_epipe_source);
+AUDIO_PIPELINE_DEFINE(neg_sink_epipe_pipeline, NEG_FRAME_SAMPLES,
+		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
+
+/* -EFBIG guard: one frame past a data chunk that is already at the 32 bit
+ * ceiling. The source is scripted to hand out one stereo frame per call and
+ * never to end, so the guard - not the end of the stream - is what stops it.
+ */
+AUDIO_FAKE_SOURCE_DEFINE(neg_efbig_source);
 AUDIO_FILE_WRITER_NODE_DEFINE(neg_efbig_writer, &neg_efbig_source,
 			      AUDIO_TEST_PATH("neg_efbig.wav"));
 
@@ -327,23 +312,18 @@ ZTEST(audio_pipeline_negative, test_source_truncated_file_reports_clean_eof)
 	 */
 	{
 		static uint8_t trunc_buf[128];
-		struct wav_parser_result wav;
-		struct fs_file_t file;
-		ssize_t read;
+		struct audio_wav_header wav;
+		size_t read;
 
-		fs_file_t_init(&file);
-		zassert_equal(fs_open(&file, AUDIO_TEST_PATH("neg_trunc_out.wav"), FS_O_READ), 0,
-			      "output could not be reopened");
-		read = fs_read(&file, trunc_buf, sizeof(trunc_buf));
-		zassert_true(read > 0, "output read back failed (%d)", (int)read);
-		zassert_equal(fs_close(&file), 0, "close after read back failed");
+		read = audio_test_read_file(AUDIO_TEST_PATH("neg_trunc_out.wav"), trunc_buf,
+					    sizeof(trunc_buf));
 
-		zassert_equal(wav_parser_read_header(trunc_buf, (size_t)read, &wav), 0,
+		zassert_equal(audio_wav_read_header(trunc_buf, read, &wav), 0,
 			      "the sink left an unparsable file");
 		zassert_equal(wav.data_size, sizeof(payload),
 			      "the writer stored %u bytes, expected %u", wav.data_size,
 			      (unsigned int)sizeof(payload));
-		zassert_equal((size_t)read, WAV_PARSER_MIN_HEADER_SIZE + sizeof(payload),
+		zassert_equal(read, AUDIO_WAV_MIN_HEADER_SIZE + sizeof(payload),
 			      "output file is the wrong length");
 	}
 }
@@ -361,8 +341,10 @@ ZTEST(audio_pipeline_negative, test_processing_error_emits_error_event_with_code
 	 * nodes remap a stray -EPIPE to, so it is the natural stand-in for a disk
 	 * that stops accepting data mid-stream (spec §12.3).
 	 */
-	neg_fault_source_state.good_frames = 1U;
-	neg_fault_source_state.fail_ret = -EIO;
+	audio_fake_source_reset(&neg_fault_source_state);
+	neg_fault_source_state.frames_total = AUDIO_FAKE_ENDLESS;
+	neg_fault_source_state.fail_at_frame = 2U; /* one good frame, then fail */
+	neg_fault_source_state.process_ret = -EIO;
 
 	zassert_equal(audio_pipeline_init(&neg_fault_pipeline, &neg_config, &neg_fault_writer), 0,
 		      "init failed");
@@ -382,6 +364,75 @@ ZTEST(audio_pipeline_negative, test_processing_error_emits_error_event_with_code
 }
 
 /* -------------------------------------------------------------------------
+ * A source failing with -EPIPE, two nodes below the application.
+ * ----------------------------------------------------------------------
+ */
+
+ZTEST(audio_pipeline_negative, test_source_epipe_through_filter_is_not_an_eof)
+{
+	struct audio_pipeline_event event;
+
+	/* -EPIPE is the pipeline's own end-of-stream code, so a node that
+	 * forwarded it would turn a third-party source's failure into a clean
+	 * EOF. The chain here is source -> filter -> sink: the remap has to
+	 * happen wherever the failure enters, not only at the sink.
+	 */
+	audio_fake_source_reset(&neg_epipe_source_state);
+	neg_epipe_source_state.frames_total = AUDIO_FAKE_ENDLESS;
+	neg_epipe_source_state.fail_at_frame = 2U; /* one good frame, then fail */
+	neg_epipe_source_state.process_ret = -EPIPE;
+
+	zassert_equal(audio_pipeline_init(&neg_epipe_pipeline, &neg_config, &neg_epipe_sink), 0,
+		      "init failed");
+	zassert_equal(audio_pipeline_start(&neg_epipe_pipeline), 0, "start failed");
+	zassert_equal(audio_pipeline_play(&neg_epipe_pipeline), 0, "play failed");
+
+	zassert_equal(audio_pipeline_get_event(&neg_epipe_pipeline, &event, K_SECONDS(2)), 0,
+		      "no event within 2 s");
+	zassert_not_equal(event.type, AUDIO_PIPELINE_EVENT_EOF,
+			  "a -EPIPE from the source surfaced as a clean EOF");
+	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_ERROR,
+		      "a mid-stream failure must raise an ERROR, got type %d", (int)event.type);
+	zassert_equal(event.err, -EIO, "the reserved -EPIPE must arrive remapped to -EIO, got %d",
+		      event.err);
+	zassert_false(audio_pipeline_is_playing(&neg_epipe_pipeline),
+		      "still playing after an error");
+
+	zassert_equal(audio_pipeline_join(&neg_epipe_pipeline), 0, "join failed");
+}
+
+ZTEST(audio_pipeline_negative, test_sink_epipe_is_not_an_eof)
+{
+	struct audio_pipeline_event event;
+
+	/* The last boundary: the sink itself fails with the reserved code. No
+	 * pull sits above it, so the pipeline has to hold the invariant.
+	 */
+	audio_fake_source_reset(&neg_sink_epipe_source_state);
+	audio_fake_sink_reset(&neg_sink_epipe_sink_state);
+	neg_sink_epipe_source_state.frames_total = AUDIO_FAKE_ENDLESS;
+	neg_sink_epipe_sink_state.fail_at_frame = 2U; /* one good frame, then fail */
+	neg_sink_epipe_sink_state.process_ret = -EPIPE;
+
+	zassert_equal(audio_pipeline_init(&neg_sink_epipe_pipeline, &neg_config,
+					  &neg_sink_epipe_sink),
+		      0, "init failed");
+	zassert_equal(audio_pipeline_start(&neg_sink_epipe_pipeline), 0, "start failed");
+	zassert_equal(audio_pipeline_play(&neg_sink_epipe_pipeline), 0, "play failed");
+
+	zassert_equal(audio_pipeline_get_event(&neg_sink_epipe_pipeline, &event, K_SECONDS(2)), 0,
+		      "no event within 2 s");
+	zassert_not_equal(event.type, AUDIO_PIPELINE_EVENT_EOF,
+			  "a -EPIPE from the sink surfaced as a clean EOF");
+	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_ERROR,
+		      "a failing sink must raise an ERROR, got type %d", (int)event.type);
+	zassert_equal(event.err, -EIO, "the reserved -EPIPE must arrive remapped to -EIO, got %d",
+		      event.err);
+
+	zassert_equal(audio_pipeline_join(&neg_sink_epipe_pipeline), 0, "join failed");
+}
+
+/* -------------------------------------------------------------------------
  * Writer -EFBIG guard: a data chunk that would exceed the 32 bit size field.
  *
  * White-box: writing four more gigabytes is not possible on a RAM disk, so the
@@ -397,11 +448,14 @@ ZTEST(audio_pipeline_negative, test_sink_rejects_data_chunk_overflow)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_file_writer_state *state = neg_efbig_writer.state;
 	size_t produced = 1;
 	int ret;
+
+	audio_fake_source_reset(&neg_efbig_source_state);
+	neg_efbig_source_state.frames_total = AUDIO_FAKE_ENDLESS;
+	neg_efbig_source_state.chunk = 2U; /* one stereo frame per call */
 
 	zassert_equal(audio_node_open(&neg_efbig_writer), 0, "open failed");
 

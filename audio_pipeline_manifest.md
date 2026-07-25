@@ -31,6 +31,14 @@ It acts as the binding engineering contract for ongoing development.
 - Invokes the entire chain of upstream nodes.  
 - Consumes final data (e.g., file writer, hardware sink, test sink).
 
+### Reading from upstream
+- A filter and a sink read their upstream through **one shared pull helper**, never by invoking the
+  upstream node's `process()` themselves. The helper owns the questions every node would otherwise
+  answer for itself: a **missing upstream is a wiring error** (`-ENOTSUP`, never an empty track),
+  `-EPIPE` from below is never passed on (§7), and end of stream travels up unchanged.
+- The helper does **not** walk the chain: each node still decides *when* and *how often* it pulls,
+  which is what keeps a resampler (N in, M out) and a later mixer (several upstreams) possible.
+
 ---
 
 ## 3. Thread Model
@@ -75,15 +83,29 @@ It acts as the binding engineering contract for ongoing development.
 - All pipeline and node structures are **static**, created via macros.
 - The pipeline thread uses a **shared frame buffer**, also static.
 - Nodes may have **internal scratch buffers**, also static (via DEFINE macros).
+- `AUDIO_PIPELINE_DEFINE()` allocates the stack, the frame buffer and the event slots **per
+  instance**, so macro-defined pipelines never share storage.
+- A hand-rolled (zero-initialised) instance instead falls back on the subsystem's **built-in**
+  stack, frame buffer and event slots. There is exactly one of each, and they are **owned, not
+  shared**: `audio_pipeline_init()` claims each built-in the instance leaves NULL and refuses a
+  second claimant with `-EBUSY`; `audio_pipeline_join()` releases them again, so sequential reuse
+  works and `audio_pipeline_start()` reclaims what a join gave back. Concurrency on the built-ins is
+  therefore an error the caller sees, not silent memory corruption.
 
 ---
 
 ## 7. Pipeline Behavior at EOF
 
 - When a source cannot deliver more data (`out_size = 0`), this counts as **EOL / EOF**.
+- The frame size is reported **only** through the `out_size` out-parameter; the frame buffer handed
+  around describes storage and capacity and carries no size of its own, so there is one place to
+  write it and one place to read it.
 - Filters forward EOF unchanged.
 - The sink raises an **EOF event** (via message queue or callback).
 - Audio processing stops, but **the thread keeps running** in idle mode.
+- `-EPIPE` is **reserved** for this end-of-stream signal inside the pipeline. No node may report it
+  as a failure: every boundary an error can enter through - an upstream node, a filesystem, the sink
+  itself - remaps it to `-EIO`, so a broken node can never masquerade as a finished track.
 
 ---
 
@@ -95,6 +117,10 @@ It acts as the binding engineering contract for ongoing development.
   - `AUDIO_PIPELINE_EVENT_RECONFIG`
 - Events are exposed via a per-pipeline `k_msgq`, read with `audio_pipeline_get_event()`.
   The queue is the primary path; the optional `event_cb` callback is a secondary one.
+- The slot storage behind that queue is per instance for `AUDIO_PIPELINE_DEFINE()` and the
+  subsystem's single built-in set for a zero-initialised instance. The built-in set follows the
+  claim/release rule of §6, so two instances can never publish into one ring: the second one is
+  refused at `init()`/`start()` rather than interleaving its events with the first one's.
 - Resolved delivery contract: the callback is invoked **before** the event is queued, so an
   event becoming visible on the queue means the pipeline has finished reacting to it — chain
   quiesced and callback returned. Depth is `CONFIG_AUDIO_PIPELINE_EVENT_QUEUE_DEPTH`; on
@@ -150,7 +176,8 @@ zephyr-audio-pipeline/
 │  ├─ audio_node.h
 │  ├─ audio_nodes.h        # per-node state types, ops externs, node DEFINE macros
 │  ├─ audio_pipeline.h
-│  └─ audio_pipeline_events.h
+│  ├─ audio_pipeline_events.h
+│  └─ audio_wav.h          # RIFF/WAVE header: read and write, one byte layout
 ├─ subsys/audio/pipeline/
 │  ├─ CMakeLists.txt
 │  ├─ Kconfig
@@ -159,14 +186,12 @@ zephyr-audio-pipeline/
 │  ├─ audio_pipeline_events.c
 │  ├─ audio_node_core.c
 │  ├─ audio_internal.h
-│  ├─ nodes/
-│  │   ├─ file_reader_node.c
-│  │   ├─ file_writer_node.c
-│  │   ├─ gain_filter_node.c
-│  │   └─ null_sink_node.c
-│  └─ util/
-│      ├─ wav_parser.c
-│      └─ wav_parser.h
+│  ├─ audio_wav.c
+│  └─ nodes/
+│      ├─ file_reader_node.c
+│      ├─ file_writer_node.c
+│      ├─ gain_filter_node.c
+│      └─ null_sink_node.c
 ├─ samples/audio/pipeline_basic/
 │  ├─ CMakeLists.txt
 │  ├─ Kconfig
@@ -179,20 +204,23 @@ zephyr-audio-pipeline/
    │  ├─ app.overlay         # zephyr,ram-disk backing the ext2 fixture mount
    │  ├─ wav_fixture.h       # shared fixture: mount, raw writer, WAV generator
    │  ├─ wav_fixture.c
+   │  ├─ fake_nodes.h        # shared fakes: scripted source, counting sink, read back
+   │  ├─ fake_nodes.c
    │  ├─ Kconfig
    │  ├─ prj.conf
    │  ├─ testcase.yaml
    │  ├─ test_roundtrip.c
    │  ├─ test_error_paths.c
-   │  ├─ test_lifecycle.c        # spec §8.2/§9 lifecycle
-   │  ├─ test_static_define.c    # DEFINE macros, multi-instance isolation
-   │  ├─ test_events.c           # k_msgq event queue
-   │  ├─ test_file_reader.c      # WAV source, S16→S32 widening
-   │  └─ test_file_writer.c      # WAV sink, S32→S16 truncation
-   └─ wav_parser/                # standalone unit test, no CONFIG_AUDIO_PIPELINE
+   │  ├─ test_lifecycle.c            # spec §8.2/§9 lifecycle
+   │  ├─ test_builtin_resources.c    # built-in stack, frame buffer, event slots: claim/release
+   │  ├─ test_static_define.c        # DEFINE macros, multi-instance isolation
+   │  ├─ test_events.c               # k_msgq event queue
+   │  ├─ test_file_reader.c          # WAV source, S16→S32 widening
+   │  └─ test_file_writer.c          # WAV sink, S32→S16 truncation
+   └─ wav/                       # standalone unit test, no CONFIG_AUDIO_PIPELINE
       ├─ CMakeLists.txt
       ├─ prj.conf
       ├─ testcase.yaml
-      └─ test_wav_parser.c
+      └─ test_wav.c              # header write/read round trip, parser errors
 ```
 This document is our shared engineering contract.

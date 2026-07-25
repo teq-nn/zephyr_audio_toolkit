@@ -10,18 +10,13 @@ project(audio_pipeline_tests)
 # symbol a second definition at link time.
 target_sources(app PRIVATE
 	test_lifecycle.c
+	test_builtin_resources.c
 	test_roundtrip.c
 	test_error_paths.c
 	test_static_define.c
 	test_events.c
 	test_file_reader.c
 	test_file_writer.c
+	fake_nodes.c
 	wav_fixture.c
 )
-
-# The file node suites cross-check what they wrote against the parser the
-# subsystem itself uses. Only its header is needed here: wav_parser.c is
-# already part of the module library, and compiling it again would duplicate
-# the symbols.
-get_filename_component(AUDIO_PIPELINE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../.. ABSOLUTE)
-target_include_directories(app PRIVATE ${AUDIO_PIPELINE_ROOT}/subsys/audio/pipeline/util)

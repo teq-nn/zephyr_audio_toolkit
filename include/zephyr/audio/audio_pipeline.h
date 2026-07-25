@@ -39,12 +39,19 @@ struct audio_pipeline_config {
  *
  *  - @p stack NULL  -> the subsystem's built-in stack, stack_size and
  *                      CONFIG_AUDIO_PIPELINE_THREAD_PRIO are installed by
- *                      audio_pipeline_init(). Only one pipeline instance can
- *                      run at a time in that case.
+ *                      audio_pipeline_init().
  *  - @p stack set   -> the caller also owns stack_size and priority.
  *
- * Likewise @p frame_buf NULL selects the built-in shared frame buffer, and
- * @p event_slots NULL the built-in shared event queue storage.
+ * Likewise @p frame_buf NULL selects the built-in frame buffer, and
+ * @p event_slots NULL the built-in event queue storage.
+ *
+ * There is exactly one of each built-in, so at most one instance may hold them:
+ * audio_pipeline_init() and audio_pipeline_start() refuse a second claimant
+ * with @c -EBUSY instead of letting two pipelines share one stack, one frame
+ * buffer and one event queue. audio_pipeline_join() hands them back, so
+ * init -> join -> init passes them on to the next instance. Two pipelines that
+ * must run at the same time therefore need AUDIO_PIPELINE_DEFINE() (or their
+ * own storage) for at least one of them.
  */
 struct audio_pipeline {
 	/* Topology and configuration, both owned by the caller. */
@@ -146,9 +153,16 @@ bool audio_pipeline_config_is_valid(const struct audio_pipeline_config *config);
  * queue is (re)initialised here, so a rebound instance never hands the
  * application events left over from its previous life.
  *
+ * For every resource field left NULL this claims the matching built-in (see
+ * @ref audio_pipeline) and installs it. A refused claim writes nothing: a fresh
+ * instance stays zeroed and uninitialised, and an instance that was joined out
+ * of its built-ins keeps the configuration and pointers of its previous life
+ * rather than being rebound to the new caller's.
+ *
  * @retval 0 on success
  * @retval -EINVAL on a NULL argument or an invalid configuration
- * @retval -EBUSY if the worker thread of this instance is still running
+ * @retval -EBUSY if the worker thread of this instance is still running, or if
+ *         another instance holds a built-in resource this one needs
  */
 int audio_pipeline_init(struct audio_pipeline *pipeline,
 			const struct audio_pipeline_config *config,
@@ -167,8 +181,14 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
  * After the error path closed the chain (spec §9.2) another start() reopens it
  * and reuses the existing thread.
  *
+ * An instance running on the built-in resources reclaims them here, because
+ * audio_pipeline_join() released them. No ERROR event is published if that
+ * fails - the event queue is one of the resources in question.
+ *
  * @retval 0 on success
  * @retval -EINVAL if the pipeline was not initialised
+ * @retval -EBUSY if another instance has taken over a built-in resource this
+ *         one was joined out of
  * @retval -ELOOP if the upstream chain exceeds the supported depth
  * @retval <0 the first node open() error
  */
@@ -202,6 +222,16 @@ int audio_pipeline_stop(struct audio_pipeline *pipeline);
  * Blocks until the thread has left its loop, so it must not be called from
  * the worker thread itself. Idempotent, and leaves the instance in the state
  * audio_pipeline_init() produced: audio_pipeline_start() can be called again.
+ *
+ * Any built-in resource this instance holds is released, so the next
+ * hand-rolled pipeline can claim it. The restart above then reclaims it, and
+ * fails with @c -EBUSY if another instance got there first. Between the join
+ * and that successful reclaim the instance owns nothing, even though it still
+ * points at the built-ins: do not call audio_pipeline_process_frame() or
+ * audio_pipeline_get_event() on it in that window, or it will read and write
+ * storage the new owner is using. An instance running on the built-ins must
+ * therefore be joined before it goes out of scope - nothing else gives them
+ * back.
  *
  * @retval 0 on success
  * @retval -EINVAL if the pipeline was not initialised

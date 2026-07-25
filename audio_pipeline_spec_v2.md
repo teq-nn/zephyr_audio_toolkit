@@ -123,12 +123,16 @@ enum audio_node_role {
     AUDIO_NODE_ROLE_SINK,
 };
 
+struct audio_buffer_view {
+    int32_t *data;     /* frame buffer, owned by the pipeline */
+    size_t   capacity; /* samples the buffer can hold */
+};
+
 struct audio_node_ops {
     int (*open)(struct audio_node *node);
-    ssize_t (*process)(struct audio_node *node,
-                       int32_t *buf,
-                       size_t capacity,   /* in samples */
-                       size_t *out_size); /* in samples */
+    int (*process)(struct audio_node *node,
+                   struct audio_buffer_view *buf,
+                   size_t *out_size); /* in samples */
     int (*close)(struct audio_node *node);
 };
 
@@ -136,7 +140,7 @@ struct audio_node {
     enum audio_node_role role;
     const struct audio_node_ops *ops;
     struct audio_node *upstream; /* NULL for sources */
-    void *context;               /* implementation-specific state */
+    void *state;                 /* implementation-specific state */
 };
 ```
 
@@ -144,10 +148,29 @@ struct audio_node {
 The function pointers in `audio_node_ops` are named **`open`**, **`process`**, **`close`** (“opc”), as requested.
 
 **Error codes:**  
-- `open()` and `close()` return `int` with Zephyr error codes (`0` on success, `< 0` on failure; e.g., `-EINVAL`, `-EIO`, `-ENOMEM`).
-- `process()` returns `ssize_t`:
-  - `>= 0`: number of samples actually produced (mirrored in `out_size`),
-  - `< 0`: error code (e.g., `-EIO`).
+- `open()`, `process()` and `close()` return `int` with Zephyr error codes (`0` on success, `< 0` on failure; e.g., `-EINVAL`, `-EIO`, `-ENOMEM`).
+- On success `process()` reports the number of samples actually produced in `*out_size`; `0` means end of stream.
+
+**One size, one place:**
+The frame size travels **only** through `*out_size`. `audio_buffer_view` describes the buffer (`data`, `capacity`) and nothing else, so a node has exactly one field to write and a caller exactly one field to read.
+
+### 4.1.1 Pulling from upstream
+
+Reading a frame from upstream has exactly one implementation:
+
+```c
+int audio_node_pull(struct audio_node *node,
+                    struct audio_buffer_view *buf,
+                    size_t *out_size);
+```
+
+Every filter and every sink reads its upstream through `audio_node_pull()` and passes **itself** as `node`; no node invokes an upstream node's `process` op (directly or through `audio_node_process()`). The helper owns the three decisions that used to be repeated per node:
+
+- **No upstream is a wiring error.** §4.3 and §4.4 require a filter and a sink to have an upstream, so `node->upstream == NULL` returns `-ENOTSUP` — never a clean end of stream, which would silently swallow the track.
+- **`-EPIPE` never escapes upwards.** `-EPIPE` is the pipeline's reserved end-of-stream code (§9). A `-EPIPE` arriving from below is remapped to `-EIO`, so a broken upstream can never reach the application as a finished track.
+- **End of stream is forwarded verbatim.** `*out_size == 0` with return `0` travels up the chain unchanged; `*out_size` is `0` on every failure.
+
+Nodes keep control of **when** and **how often** they pull: a resampler may pull several times per frame and a mixer once per upstream (§13).
 
 ### 4.2 Source role
 
@@ -166,7 +189,7 @@ EOF convention:
 - `role == AUDIO_NODE_ROLE_FILTER`
 - `upstream != NULL`
 - `process()`:
-  - first calls `upstream->ops->process(...)`,
+  - first calls `audio_node_pull(node, buf, out_size)` (§4.1.1),
   - processes the delivered samples (in-place or using scratch),
   - writes the resulting sample count back to `*out_size`.
 
@@ -181,10 +204,11 @@ EOF behavior:
 - `role == AUDIO_NODE_ROLE_SINK`
 - `upstream != NULL`
 - `process()`:
-  - calls `upstream->ops->process(...)`,
+  - calls `audio_node_pull(node, buf, out_size)` (§4.1.1),
   - processes or consumes the data (e.g., writes to a file),
   - the pipeline mostly cares about EOF/errors:
     - If `*out_size == 0`: end-of-stream detected.
+    - A sink defined without an upstream is a wiring error: the pull reports `-ENOTSUP`.
 
 Note:
 - Unlike many frameworks, the sink does not have to write into `buf`; it uses it as a transient transport buffer.
@@ -272,6 +296,42 @@ struct audio_pipeline {
 };
 ```
 
+#### Built-in resources and their ownership
+
+`stack`, `frame_buf` and `event_slots` are the caller's seam. Left NULL they select the
+subsystem's built-in objects — one thread stack, one frame buffer, one set of event slots, all
+file-scope statics in the core.
+
+Because there is only one of each, they are **claimed**, not shared:
+
+- `audio_pipeline_init()` claims every built-in the instance leaves NULL and installs it. If
+  another instance already holds one of them, init fails with `-EBUSY` and writes nothing: a fresh
+  instance stays zeroed and not `initialized`, and an instance that was joined out of its built-ins
+  keeps its previous configuration and pointers instead of being rebound.
+- Ownership is tracked per resource, so an instance that brings its own stack but no frame buffer
+  contends only for the frame buffer.
+- Re-initialising an instance that already owns a built-in succeeds — rebinding a pipeline to a new
+  configuration or sink must not lock it out of its own storage.
+- `audio_pipeline_join()` releases whatever the instance holds, which is what makes
+  init → join → init hand the built-ins on to the next instance.
+- `audio_pipeline_start()` claims again, because a joined instance still points at resources it has
+  given back. It returns `-EBUSY` if they were taken in the meantime, and publishes **no** ERROR
+  event in that case — the event queue is one of the resources it no longer owns.
+
+Two pipelines that must run concurrently therefore need `AUDIO_PIPELINE_DEFINE()` (or caller-owned
+storage) for at least one of them; that path allocates per instance and never touches the built-ins.
+
+Two obligations fall on the caller, because the guard covers the entry points that *take* the
+resources, not every use of them:
+
+- An instance running on the built-ins must be joined before it is discarded. `join()` is the only
+  release; there is no deinit, and an instance that is initialised and then abandoned holds them
+  for the lifetime of the process.
+- Between a `join()` and the next successful `init()`/`start()` the instance still points at the
+  built-ins but owns none of them. `audio_pipeline_process_frame()` and
+  `audio_pipeline_get_event()` must not be called in that window — they would read and write the
+  new owner's frame buffer and event ring.
+
 ### 6.2 Static definition
 
 The pipeline is defined statically via a macro, e.g.:
@@ -345,8 +405,10 @@ Agreements:
 
 - `audio_pipeline_init()`:
   - sets internal flags,
+  - claims and installs the built-in stack, frame buffer and event slots for every resource field
+    the instance left NULL (§6.1), returning `-EBUSY` when another instance holds one of them,
   - initializes the event queue,
-  - may be called only once per pipeline instance.
+  - may be called again on the same instance to rebind it (that is not a second claim).
 - `audio_pipeline_set_nodes()`:
   - assigns `source`, filter list, and `sink`,
   - internally links `upstream` pointers (Filter[i].upstream = (i==0 ? source : Filter[i-1]); sink.upstream = last filter or source).
@@ -366,6 +428,8 @@ int audio_pipeline_join(struct audio_pipeline *pl); /* optional: wait for thread
 Recommended behavior:
 
 - `audio_pipeline_start()`:
+  - reclaims the built-in resources the instance runs on (§6.1), failing with `-EBUSY` and without
+    an ERROR event if another instance took them after a join,
   - creates the thread (if not already existing),
   - opens all nodes via `node->ops->open`.
 - `audio_pipeline_play()`:
@@ -375,7 +439,9 @@ Recommended behavior:
   - sets `pl->playing = false`,
   - thread stays alive but idles/waits.
 - `audio_pipeline_join()`:
-  - optional: ends thread (cleanup scenarios).
+  - optional: ends thread (cleanup scenarios),
+  - releases any built-in resource the instance holds (§6.1), after the closing errors have been
+    published, so the next hand-rolled pipeline can claim it.
 
 ### 8.3 Events
 
@@ -421,6 +487,7 @@ Behavior:
 ### 9.2 Errors
 
 - Any negative return value from `open()`, `process()`, `close()` is an error.
+- `-EPIPE` is **reserved** for end of stream: `audio_pipeline_process_frame()` returns it when the sink reports `out_size == 0`, and the worker thread turns that into a clean EOF event. No node may report `-EPIPE` as a failure. `audio_node_pull()` (§4.1.1) enforces this on the upstream boundary; a node that talks to a filesystem remaps its own `-EPIPE` to `-EIO` the same way.
 - On the first error:
   - pipeline stops further frame processing (`playing = false`),
   - generates `AUDIO_PIPELINE_EVENT_ERROR`,
@@ -473,8 +540,10 @@ struct audio_file_reader_state {
 
 Implementation mirrors the reader, in reverse. Two decisions are contract:
 
-- **Header sizes: placeholder, then patch.** `open()` writes a canonical 44-byte
-  header declaring an empty chunk (RIFF size 36, `data` size 0). The real sizes are
+- **Header sizes: placeholder, then patch.** `open()` serialises a canonical
+  44-byte header through the WAV module (§10.3) declaring an empty chunk (RIFF
+  size 36, `data` size 0) *before* it creates the file, so a format the module
+  refuses leaves no truncated file behind. The real sizes are
   patched by seeking to 0, rewriting the header, `fs_sync()`, then seeking back to
   end. This happens on **end of stream as well as in `close()`**, so the file is
   already valid when the pipeline reports EOF — before `join()`. `data_size` counts
@@ -493,6 +562,36 @@ needed. Round-to-nearest is rejected deliberately — the `+0x8000` bias overflo
 `int32_t` just below `INT32_MAX` and pushes full scale out of the int16 range.
 Truncation is also the exact inverse of the reader's `s16 << 16`, which makes the
 roundtrip bit-identical.
+
+### 10.3 WAV header module (shared)
+
+Both file nodes delegate the RIFF/WAVE byte layout to one module,
+`include/zephyr/audio/audio_wav.h` + `subsys/audio/pipeline/audio_wav.c`. It is
+public API, allocation free and filesystem free: it only maps a byte buffer to
+and from a `struct audio_wav_header`.
+
+```c
+int audio_wav_read_header(const uint8_t *data, size_t len, struct audio_wav_header *out);
+int audio_wav_write_header(uint8_t *buf, size_t len, const struct audio_wav_header *hdr);
+```
+
+- **One record, both directions.** `sample_rate_hz`, `data_size`, `format_tag`,
+  `channels` and `bits_per_sample` describe the stream and are read and written;
+  `data_offset` and `block_align` are derived — outputs of a read, ignored by a
+  write.
+- **The reader walks the chunk list**, so `JUNK`/`LIST`/`fact` chunks around
+  `fmt ` and `data` are skipped and a short prefix of the file is enough
+  (`AUDIO_WAV_HEADER_SCAN_SIZE`). The writer emits only the canonical
+  `AUDIO_WAV_MIN_HEADER_SIZE` (44) byte form with no payload.
+- **Both halves share one definition of a usable format**, so the writer can
+  never emit a header the reader rejects: `-EINVAL` for a degenerate `fmt `
+  field, `-EFBIG` for a payload past `AUDIO_WAV_MAX_DATA_SIZE`. The one
+  asymmetry is deliberate — a `format_tag` other than `AUDIO_WAV_FORMAT_PCM` is
+  serialised verbatim and read back as `-ENOTSUP`, which is what lets a test
+  produce a non-PCM file without spelling out field offsets.
+- **Nothing outside this module derives the layout.** The file writer sink
+  supplies the stream description and the module lays out the bytes; the same
+  holds for the reference sample and the test fixture.
 
 ---
 
@@ -546,6 +645,10 @@ Test steps:
 - Corrupted WAV header → `open()` must fail.
 - Early EOF → pipeline must emit a clean EOF event.
 - Simulated I/O errors → ERROR event.
+- A second hand-rolled pipeline claiming the built-in resources (§6.1) → `-EBUSY` from `init()`,
+  the first claimant unaffected, and the built-ins reusable after its `join()`. The two instances
+  must be distinguishable (different frame sizes, sample patterns and frame counts), otherwise the
+  test would still pass if the guard were removed.
 
 ---
 
@@ -577,7 +680,8 @@ zephyr-audio-pipeline/
 │        ├─ audio_node.h
 │        ├─ audio_nodes.h        # per-node state types, ops externs, node DEFINE macros
 │        ├─ audio_pipeline.h
-│        └─ audio_pipeline_events.h
+│        ├─ audio_pipeline_events.h
+│        └─ audio_wav.h          # RIFF/WAVE header: read and write, one byte layout
 ├─ subsys/
 │  └─ audio/
 │     └─ pipeline/
@@ -588,14 +692,12 @@ zephyr-audio-pipeline/
 │        ├─ audio_pipeline_events.c
 │        ├─ audio_node_core.c
 │        ├─ audio_internal.h
-│        ├─ nodes/
-│        │   ├─ file_reader_node.c
-│        │   ├─ file_writer_node.c
-│        │   ├─ gain_filter_node.c
-│        │   └─ null_sink_node.c
-│        └─ util/
-│            ├─ wav_parser.c
-│            └─ wav_parser.h
+│        ├─ audio_wav.c
+│        └─ nodes/
+│            ├─ file_reader_node.c
+│            ├─ file_writer_node.c
+│            ├─ gain_filter_node.c
+│            └─ null_sink_node.c
 ├─ samples/
 │  └─ audio/
 │     └─ pipeline_basic/

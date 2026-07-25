@@ -12,6 +12,8 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include <zephyr/audio/audio_wav.h>
+
 #include "wav_fixture.h"
 
 /* Disk name of the ramdisk0 node in app.overlay. */
@@ -74,39 +76,34 @@ int audio_test_write_raw(const char *path, const void *data, size_t len)
 
 int audio_test_write_wav(const char *path, const struct audio_test_wav_spec *spec)
 {
-	/* 44 byte canonical header plus the largest payload any test needs. */
-	uint8_t buf[44 + 1024];
-	uint16_t format_tag = (spec->format_tag != 0U) ? spec->format_tag : 1U;
-	uint16_t channels = (spec->channels != 0U) ? spec->channels : 2U;
-	uint32_t rate = (spec->sample_rate_hz != 0U) ? spec->sample_rate_hz : 48000U;
-	uint16_t bits = (spec->bits_per_sample != 0U) ? spec->bits_per_sample : 16U;
-	uint32_t declared = (spec->declared_data_size != 0U) ? spec->declared_data_size
-							     : (uint32_t)spec->payload_len;
-	uint16_t block_align = (uint16_t)(channels * (bits / 8U));
-	size_t len = 44U + spec->payload_len;
+	/* Canonical header plus the largest payload any test needs. */
+	uint8_t buf[AUDIO_WAV_MIN_HEADER_SIZE + 1024];
+	const struct audio_wav_header hdr = {
+		.sample_rate_hz = (spec->sample_rate_hz != 0U) ? spec->sample_rate_hz : 48000U,
+		.data_size = (spec->declared_data_size != 0U) ? spec->declared_data_size
+							     : (uint32_t)spec->payload_len,
+		.format_tag = (spec->format_tag != 0U) ? spec->format_tag : AUDIO_WAV_FORMAT_PCM,
+		.channels = (spec->channels != 0U) ? spec->channels : 2U,
+		.bits_per_sample = (spec->bits_per_sample != 0U) ? spec->bits_per_sample : 16U,
+	};
+	size_t len = AUDIO_WAV_MIN_HEADER_SIZE + spec->payload_len;
+	int ret;
 
 	if (len > sizeof(buf)) {
 		return -ENOMEM;
 	}
 
-	memcpy(&buf[0], "RIFF", 4);
-	sys_put_le32((uint32_t)(36U + declared), &buf[4]);
-	memcpy(&buf[8], "WAVE", 4);
-
-	memcpy(&buf[12], "fmt ", 4);
-	sys_put_le32(16U, &buf[16]);
-	sys_put_le16(format_tag, &buf[20]);
-	sys_put_le16(channels, &buf[22]);
-	sys_put_le32(rate, &buf[24]);
-	sys_put_le32(rate * block_align, &buf[28]);
-	sys_put_le16(block_align, &buf[32]);
-	sys_put_le16(bits, &buf[34]);
-
-	memcpy(&buf[36], "data", 4);
-	sys_put_le32(declared, &buf[40]);
+	/* The fixture describes the file it wants and lets the WAV module lay
+	 * out the bytes, so a test file is exactly what the subsystem itself
+	 * would have produced - down to the last field.
+	 */
+	ret = audio_wav_write_header(buf, sizeof(buf), &hdr);
+	if (ret < 0) {
+		return ret;
+	}
 
 	if (spec->payload_len > 0U) {
-		memcpy(&buf[44], spec->payload, spec->payload_len);
+		memcpy(&buf[AUDIO_WAV_MIN_HEADER_SIZE], spec->payload, spec->payload_len);
 	}
 
 	return audio_test_write_raw(path, buf, len);

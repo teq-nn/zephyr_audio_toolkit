@@ -23,8 +23,9 @@
 
 #include <zephyr/audio/audio_node.h>
 #include <zephyr/audio/audio_nodes.h>
+#include <zephyr/audio/audio_wav.h>
 
-#include "../util/wav_parser.h"
+#include "../audio_internal.h"
 
 LOG_MODULE_REGISTER(audio_file_reader, LOG_LEVEL_INF);
 
@@ -34,22 +35,6 @@ LOG_MODULE_REGISTER(audio_file_reader, LOG_LEVEL_INF);
 
 /* Interleaving is pipeline-wide (spec §5.2); v1 is stereo, mono costs nothing. */
 #define FILE_READER_MAX_CHANNELS 2U
-
-/*
- * The pipeline reserves -EPIPE for "end of stream": audio_pipeline_process_frame()
- * returns it when the sink reports out_size == 0, and the worker thread turns
- * that into a clean EOF event. A real failure must therefore never leave this
- * node as -EPIPE, or a broken file would look like a finished track.
- */
-static int file_reader_errno(int err)
-{
-	if (err == -EPIPE) {
-		LOG_WRN("remapping -EPIPE from the filesystem to -EIO");
-		return -EIO;
-	}
-
-	return err;
-}
 
 /* Drop the handle, leaving the node in a well-defined closed state. */
 static int file_reader_release(struct audio_file_reader_state *state)
@@ -66,7 +51,7 @@ static int file_reader_release(struct audio_file_reader_state *state)
 
 	state->bytes_left = 0;
 
-	return file_reader_errno(ret);
+	return audio_eof_safe_errno(ret);
 }
 
 /*
@@ -98,9 +83,9 @@ static void file_reader_widen_s16(int32_t *buf, size_t samples)
 
 static int file_reader_open(struct audio_node *node)
 {
-	uint8_t header[WAV_PARSER_HEADER_SCAN_SIZE];
+	uint8_t header[AUDIO_WAV_HEADER_SCAN_SIZE];
 	struct audio_file_reader_state *state;
-	struct wav_parser_result wav;
+	struct audio_wav_header wav;
 	ssize_t read;
 	int ret;
 
@@ -124,7 +109,7 @@ static int file_reader_open(struct audio_node *node)
 	ret = fs_open(&state->file, state->path, FS_O_READ);
 	if (ret < 0) {
 		LOG_ERR("%s: open failed (%d)", state->path, ret);
-		return file_reader_errno(ret);
+		return audio_eof_safe_errno(ret);
 	}
 
 	/* The parser walks the chunk list, so it only needs a prefix of the
@@ -133,11 +118,11 @@ static int file_reader_open(struct audio_node *node)
 	read = fs_read(&state->file, header, sizeof(header));
 	if (read < 0) {
 		LOG_ERR("%s: header read failed (%d)", state->path, (int)read);
-		ret = file_reader_errno((int)read);
+		ret = audio_eof_safe_errno((int)read);
 		goto err_close;
 	}
 
-	ret = wav_parser_read_header(header, (size_t)read, &wav);
+	ret = audio_wav_read_header(header, (size_t)read, &wav);
 	if (ret < 0) {
 		LOG_ERR("%s: not a usable WAVE file (%d)", state->path, ret);
 		goto err_close;
@@ -162,7 +147,7 @@ static int file_reader_open(struct audio_node *node)
 	ret = fs_seek(&state->file, (off_t)wav.data_offset, FS_SEEK_SET);
 	if (ret < 0) {
 		LOG_ERR("%s: seek to payload at %u failed (%d)", state->path, wav.data_offset, ret);
-		ret = file_reader_errno(ret);
+		ret = audio_eof_safe_errno(ret);
 		goto err_close;
 	}
 
@@ -207,7 +192,6 @@ static int file_reader_process(struct audio_node *node, struct audio_buffer_view
 	}
 
 	*out_size = 0;
-	buf->size = 0;
 
 	if (!state->file_open) {
 		/* process() before open(), or after close(). */
@@ -245,7 +229,7 @@ static int file_reader_process(struct audio_node *node, struct audio_buffer_view
 	read = fs_read(&state->file, buf->data, bytes);
 	if (read < 0) {
 		LOG_ERR("%s: read failed (%d)", state->path, (int)read);
-		return file_reader_errno((int)read);
+		return audio_eof_safe_errno((int)read);
 	}
 
 	state->bytes_left -= (uint32_t)read;
@@ -269,7 +253,6 @@ static int file_reader_process(struct audio_node *node, struct audio_buffer_view
 
 	file_reader_widen_s16(buf->data, samples);
 
-	buf->size = samples;
 	*out_size = samples;
 
 	return 0;

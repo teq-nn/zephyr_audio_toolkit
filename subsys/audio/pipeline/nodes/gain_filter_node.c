@@ -30,11 +30,7 @@ static int gain_filter_process(struct audio_node *node, struct audio_buffer_view
 		return -EINVAL;
 	}
 
-	if (!node->upstream) {
-		return -ENOTSUP;
-	}
-
-	ret = audio_node_process(node->upstream, buf, out_size);
+	ret = audio_node_pull(node, buf, out_size);
 	if (ret < 0 || *out_size == 0) {
 		return ret;
 	}

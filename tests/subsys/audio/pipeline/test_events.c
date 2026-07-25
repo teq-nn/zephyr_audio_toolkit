@@ -8,6 +8,8 @@
  * publisher. The optional callback is registered throughout, so every case
  * also proves that the secondary path still fires.
  *
+ * The chain is a shared fake source -> shared counting sink (fake_nodes.h).
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -16,6 +18,7 @@
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/ztest.h>
 
@@ -23,100 +26,13 @@
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
 
+#include "fake_nodes.h"
+
 #define TEST_EVENT_TIMEOUT K_MSEC(500)
 /* Long enough to be unambiguous, short enough not to slow the suite down. */
 #define TEST_EMPTY_TIMEOUT K_MSEC(50)
 
 #define TEST_READER_STACK_SIZE 1024
-
-struct fake_node_state {
-	int open_calls;
-	int close_calls;
-	int open_ret;
-	int close_ret;
-
-	/* Source behaviour. */
-	size_t frames_total;
-	size_t frames_done;
-	size_t fail_at_frame; /* 1-based; 0 disables the failure injection */
-	int process_ret;
-
-	/* Filter/sink bookkeeping. */
-	size_t frames_seen;
-	size_t eof_seen;
-};
-
-static int fake_open(struct audio_node *node)
-{
-	struct fake_node_state *state = node->state;
-
-	state->open_calls++;
-
-	return state->open_ret;
-}
-
-static int fake_close(struct audio_node *node)
-{
-	struct fake_node_state *state = node->state;
-
-	state->close_calls++;
-
-	return state->close_ret;
-}
-
-static int fake_source_process(struct audio_node *node, struct audio_buffer_view *buf,
-			       size_t *out_size)
-{
-	struct fake_node_state *state = node->state;
-
-	if (state->fail_at_frame != 0U && state->frames_done + 1U == state->fail_at_frame) {
-		return state->process_ret;
-	}
-
-	if (state->frames_done >= state->frames_total) {
-		*out_size = 0;
-		return 0;
-	}
-
-	memset(buf->data, 0, buf->capacity * sizeof(int32_t));
-	*out_size = buf->capacity;
-	state->frames_done++;
-
-	return 0;
-}
-
-static int fake_sink_process(struct audio_node *node, struct audio_buffer_view *buf,
-			     size_t *out_size)
-{
-	struct fake_node_state *state = node->state;
-	int ret;
-
-	ret = audio_node_process(node->upstream, buf, out_size);
-	if (ret < 0) {
-		return ret;
-	}
-
-	if (*out_size == 0U) {
-		state->eof_seen++;
-		return 0;
-	}
-
-	state->frames_seen++;
-
-	return 0;
-}
-
-static const struct audio_node_ops fake_source_ops = {
-	.open = fake_open,
-	.process = fake_source_process,
-	.close = fake_close,
-};
-
-static const struct audio_node_ops fake_sink_ops = {
-	.open = fake_open,
-	.process = fake_sink_process,
-	.close = fake_close,
-};
 
 /* The worker thread keeps a pointer to the pipeline, so the fixture outlives
  * the individual test functions.
@@ -124,8 +40,8 @@ static const struct audio_node_ops fake_sink_ops = {
 static struct audio_pipeline test_pipeline;
 static struct audio_node test_source;
 static struct audio_node test_sink;
-static struct fake_node_state source_state;
-static struct fake_node_state sink_state;
+static struct audio_fake_source source_state;
+static struct audio_fake_sink sink_state;
 
 /* Secondary (callback) path bookkeeping. */
 static struct audio_pipeline_event cb_last_event;
@@ -175,8 +91,8 @@ static void events_before(void *fixture)
 	ARG_UNUSED(fixture);
 
 	memset(&test_pipeline, 0, sizeof(test_pipeline));
-	memset(&source_state, 0, sizeof(source_state));
-	memset(&sink_state, 0, sizeof(sink_state));
+	audio_fake_source_reset(&source_state);
+	audio_fake_sink_reset(&sink_state);
 	memset(&cb_last_event, 0, sizeof(cb_last_event));
 	memset(&reader_event, 0, sizeof(reader_event));
 	cb_events = 0;
@@ -184,13 +100,13 @@ static void events_before(void *fixture)
 
 	test_source = (struct audio_node){
 		.role = AUDIO_NODE_ROLE_SOURCE,
-		.ops = &fake_source_ops,
+		.ops = &audio_fake_source_ops,
 		.upstream = NULL,
 		.state = &source_state,
 	};
 	test_sink = (struct audio_node){
 		.role = AUDIO_NODE_ROLE_SINK,
-		.ops = &fake_sink_ops,
+		.ops = &audio_fake_sink_ops,
 		.upstream = &test_source,
 		.state = &sink_state,
 	};
@@ -269,7 +185,7 @@ ZTEST(audio_pipeline_events, test_eof_event_arrives_through_the_queue)
 	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_EOF, "expected an EOF event");
 	zassert_equal(event.err, 0, "EOF must not carry an error code");
 
-	zassert_equal(sink_state.eof_seen, 1U, "sink did not see EOF");
+	zassert_equal(atomic_get(&sink_state.eof_seen), 1U, "sink did not see EOF");
 	zassert_false(audio_pipeline_is_playing(&test_pipeline), "still playing after EOF");
 
 	/* Exactly one event, and the idling worker must not repeat it. */
@@ -316,8 +232,10 @@ ZTEST(audio_pipeline_events, test_error_event_arrives_after_the_chain_is_quiesce
 	/* Ordering contract (spec §9.2): the nodes are closed before the event
 	 * becomes observable, so the application sees a quiesced pipeline.
 	 */
-	zassert_equal(sink_state.close_calls, 1, "sink not closed before the ERROR event");
-	zassert_equal(source_state.close_calls, 1, "source not closed before the ERROR event");
+	zassert_equal(atomic_get(&sink_state.close_calls), 1,
+		      "sink not closed before the ERROR event");
+	zassert_equal(atomic_get(&source_state.close_calls), 1,
+		      "source not closed before the ERROR event");
 	zassert_false(audio_pipeline_is_playing(&test_pipeline), "still playing after the error");
 }
 

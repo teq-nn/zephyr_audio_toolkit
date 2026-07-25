@@ -158,7 +158,6 @@ ZTEST(audio_pipeline_file_reader, test_source_converts_s16_to_s32)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	size_t produced = 0;
 	size_t i;
@@ -192,7 +191,6 @@ ZTEST(audio_pipeline_file_reader, test_source_reports_eof)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_file_reader_state *state = pcm_reader.state;
 	size_t produced = 0;
@@ -224,7 +222,6 @@ ZTEST(audio_pipeline_file_reader, test_source_delivers_partial_final_frame)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	/* 12 samples against a capacity of 8: one full frame, then four. */
 	const size_t total = 12;
@@ -260,7 +257,6 @@ ZTEST(audio_pipeline_file_reader, test_source_treats_short_read_as_eof)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_test_wav_spec spec = {
 		/* The header promises 4 KiB, the file carries 8 samples. The
@@ -298,7 +294,6 @@ ZTEST(audio_pipeline_file_reader, test_source_process_without_open_fails)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	size_t produced = 1;
 	int ret;
@@ -315,7 +310,6 @@ ZTEST(audio_pipeline_file_reader, test_source_rejects_undersized_buffer)
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_file_reader_state *state = pcm_reader.state;
 	size_t produced = 1;
@@ -342,7 +336,6 @@ ZTEST(audio_pipeline_file_reader, test_source_close_releases_handle_and_allows_r
 	struct audio_buffer_view view = {
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
-		.size = 0,
 	};
 	struct audio_file_reader_state *state = pcm_reader.state;
 	size_t produced = 0;

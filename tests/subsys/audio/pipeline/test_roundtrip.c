@@ -15,7 +15,6 @@
 #include <errno.h>
 #include <string.h>
 
-#include <zephyr/fs/fs.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
@@ -25,9 +24,10 @@
 #include <zephyr/audio/audio_nodes.h>
 #include <zephyr/audio/audio_pipeline.h>
 #include <zephyr/audio/audio_pipeline_events.h>
+#include <zephyr/audio/audio_wav.h>
 
+#include "fake_nodes.h"
 #include "wav_fixture.h"
-#include "wav_parser.h"
 
 #define RT_FRAME_SAMPLES 16
 
@@ -48,7 +48,7 @@
 #define RT_STEREO_FRAMES 45U
 #define RT_SAMPLE_COUNT (RT_STEREO_FRAMES * 2U)
 #define RT_PAYLOAD_BYTES (RT_SAMPLE_COUNT * sizeof(int16_t))
-#define RT_FILE_BYTES (WAV_PARSER_MIN_HEADER_SIZE + RT_PAYLOAD_BYTES)
+#define RT_FILE_BYTES (AUDIO_WAV_MIN_HEADER_SIZE + RT_PAYLOAD_BYTES)
 
 /* file_reader source -> file_writer sink: the plain roundtrip. */
 AUDIO_FILE_READER_NODE_DEFINE(rt_reader, AUDIO_TEST_PATH("rt_golden.wav"));
@@ -103,28 +103,6 @@ static void build_golden_samples(void)
 	}
 }
 
-/** Read @p path in full into @p buf; fails the test if it does not fit. */
-static size_t read_file(const char *path, uint8_t *buf, size_t cap)
-{
-	struct fs_file_t file;
-	ssize_t read;
-	int ret;
-
-	memset(buf, 0, cap);
-	fs_file_t_init(&file);
-
-	ret = fs_open(&file, path, FS_O_READ);
-	zassert_equal(ret, 0, "%s: could not be opened for read back (%d)", path, ret);
-
-	read = fs_read(&file, buf, cap);
-	zassert_true(read >= 0, "%s: read back failed (%d)", path, (int)read);
-	zassert_true((size_t)read < cap, "%s: file does not fit the read buffer", path);
-
-	zassert_equal(fs_close(&file), 0, "%s: close after read back failed", path);
-
-	return (size_t)read;
-}
-
 /* Drive a pipeline from a golden source until it reports a clean EOF, then join
  * so the sink's output file is finalised. Fails the test on any other outcome.
  */
@@ -173,8 +151,9 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_reproduces_golden_master)
 
 	run_to_eof(&rt_pipeline, &rt_writer);
 
-	golden_len = read_file(AUDIO_TEST_PATH("rt_golden.wav"), golden_buf, sizeof(golden_buf));
-	out_len = read_file(AUDIO_TEST_PATH("rt_out.wav"), out_buf, sizeof(out_buf));
+	golden_len = audio_test_read_file(AUDIO_TEST_PATH("rt_golden.wav"), golden_buf,
+					  sizeof(golden_buf));
+	out_len = audio_test_read_file(AUDIO_TEST_PATH("rt_out.wav"), out_buf, sizeof(out_buf));
 
 	/* The whole point of the ticket: identical size, then identical bytes. */
 	zassert_equal(golden_len, RT_FILE_BYTES, "golden master is %zu bytes, expected %u",
@@ -192,19 +171,20 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_reproduces_golden_master)
 
 ZTEST(audio_pipeline_roundtrip, test_roundtrip_gain_transforms_samples)
 {
-	struct wav_parser_result wav;
+	struct audio_wav_header wav;
 	size_t golden_len;
 	size_t out_len;
 	size_t i;
 
 	run_to_eof(&rt_gain_pipeline, &rt_gain_writer);
 
-	golden_len = read_file(AUDIO_TEST_PATH("rt_golden.wav"), golden_buf, sizeof(golden_buf));
-	out_len = read_file(AUDIO_TEST_PATH("rt_gain.wav"), out_buf, sizeof(out_buf));
+	golden_len = audio_test_read_file(AUDIO_TEST_PATH("rt_golden.wav"), golden_buf,
+					  sizeof(golden_buf));
+	out_len = audio_test_read_file(AUDIO_TEST_PATH("rt_gain.wav"), out_buf, sizeof(out_buf));
 
 	/* Same shape as the master: a valid PCM WAV of identical length. */
 	zassert_equal(out_len, golden_len, "half-gain output changed the file length");
-	zassert_equal(wav_parser_read_header(out_buf, out_len, &wav), 0,
+	zassert_equal(audio_wav_read_header(out_buf, out_len, &wav), 0,
 		      "half-gain output is not a parsable WAV");
 	zassert_equal(wav.channels, 2U, "channel count changed");
 	zassert_equal(wav.sample_rate_hz, 48000U, "sample rate changed");
@@ -231,7 +211,7 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_gain_transforms_samples)
 	 * conversion rules, not copied from the gain node.
 	 */
 	for (i = 0; i < RT_SAMPLE_COUNT; i++) {
-		uint16_t got = sys_get_le16(&out_buf[WAV_PARSER_MIN_HEADER_SIZE +
+		uint16_t got = sys_get_le16(&out_buf[AUDIO_WAV_MIN_HEADER_SIZE +
 						     i * sizeof(int16_t)]);
 		uint16_t expect = (uint16_t)(int16_t)(golden_samples[i] >> 1);
 
