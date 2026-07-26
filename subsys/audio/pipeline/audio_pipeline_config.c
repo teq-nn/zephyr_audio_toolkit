@@ -12,9 +12,9 @@ bool audio_pipeline_config_is_valid(const struct audio_pipeline_config *config)
 		return false;
 	}
 
-	if (!config->stream.sample_rate_hz || !config->stream.channels) {
-		return false;
-	}
-
+	/* The format is not part of the configuration: it is bound separately
+	 * with audio_pipeline_set_format(), which does its own validation, and
+	 * audio_pipeline_start() refuses a pipeline that has none (spec §5.2).
+	 */
 	return true;
 }

@@ -3,6 +3,8 @@
 
 #include <zephyr/types.h>
 
+#include <zephyr/audio/audio_format.h>
+
 /**
  * @brief The frame buffer a node is handed for the duration of one process()
  *        call.
@@ -33,11 +35,34 @@ struct audio_node_ops {
 	int (*close)(struct audio_node *node);
 };
 
+/**
+ * @brief One node of the chain.
+ *
+ * The three ops are the whole interface a node implements; everything the
+ * pipeline has to tell a node travels on this object rather than through the
+ * op signatures (spec §4.1).
+ */
 struct audio_node {
 	enum audio_node_role role;
 	const struct audio_node_ops *ops;
 	struct audio_node *upstream;
 	void *state;
+	/**
+	 * Format the whole pipeline runs at (spec §5.2).
+	 *
+	 * Owned by the pipeline, which installs it here immediately before it
+	 * calls this node's open() and leaves it in place for as long as the
+	 * node is open. NULL until the node has been opened by a pipeline, and
+	 * read-only to the node: a node checks the format against what it can
+	 * deliver or accept and fails its open() when it cannot comply - v1 has
+	 * no resampler and no channel mapper, so a node can only match or
+	 * refuse, never adapt (spec §1.3/§5.2).
+	 *
+	 * Written only by audio_pipeline_start(), i.e. from the control thread,
+	 * and read only by open() on that same thread, so it needs no lock
+	 * (spec §3.3).
+	 */
+	const struct audio_stream_config *pipeline_format;
 };
 
 int audio_node_open(struct audio_node *node);

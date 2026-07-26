@@ -12,6 +12,7 @@
 
 #include <stdbool.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/types.h>
 
@@ -19,8 +20,14 @@
 #include <zephyr/audio/audio_node.h>
 #include <zephyr/audio/audio_pipeline_events.h>
 
+/**
+ * @brief Static configuration of a pipeline instance.
+ *
+ * Carries no format: the pipeline format is bound at run time with
+ * audio_pipeline_set_format() and nowhere else, so there is never a second
+ * place to look for the format a run is using (spec §5.2/§8.1).
+ */
 struct audio_pipeline_config {
-	struct audio_stream_config stream;
 	uint16_t frame_samples;
 	audio_pipeline_event_callback_t event_cb;
 	void *event_user_data;
@@ -58,6 +65,15 @@ struct audio_pipeline {
 	const struct audio_pipeline_config *config;
 	struct audio_node *sink;
 
+	/* The one format this pipeline runs at, owned by the pipeline and
+	 * installed on every node before that node is opened (spec §5.2).
+	 * Written only by audio_pipeline_set_format(); @p format_bound stays
+	 * false until it has been, which is what audio_pipeline_start() refuses
+	 * on. audio_pipeline_init() clears both again.
+	 */
+	struct audio_stream_config format;
+	bool format_bound;
+
 	/* Worker thread resources (see above). */
 	struct k_thread thread;
 	k_thread_stack_t *stack;
@@ -75,22 +91,53 @@ struct audio_pipeline {
 	struct audio_pipeline_event *event_slots;
 	size_t event_slot_count;
 
+	/* How often the built-in event slots had changed hands when this
+	 * instance last claimed them, which is what says whether the @c k_msgq
+	 * above still describes the contents of the storage it points at. Unused
+	 * by an instance that brought its own slots; zero means "never claimed".
+	 *
+	 * Private to the subsystem: observe it through the return value of
+	 * audio_pipeline_get_event(), which refuses a binding another instance
+	 * has since reset with @c -EPERM instead of reading that instance's ring.
+	 */
+	uint32_t event_slots_epoch;
+
 	/* Released whenever the worker must leave its idle wait. */
 	struct k_sem wake;
 
-	bool initialized;
-	/* Written by the worker thread on the error path, read by the control
-	 * thread, hence volatile - same for playing and quit.
+	/* The one lifecycle state of this instance. It replaces the five
+	 * booleans this struct used to carry - initialised, node chain open,
+	 * worker thread alive, worker pulling - so that the combinations which
+	 * were expressible but never reachable no longer exist: every one of
+	 * those facts is now a function of this single value, and every legal
+	 * move between values lives in one transition table in
+	 * audio_pipeline_core.c.
+	 *
+	 * The values are enum audio_pipeline_state, private to the subsystem
+	 * (subsys/audio/pipeline/audio_internal.h). Zero is "not initialised",
+	 * which is what makes a zeroed instance uninitialised by construction.
+	 * Read it from outside through audio_pipeline_is_running() and
+	 * audio_pipeline_is_playing().
+	 *
+	 * @c atomic_t rather than a volatile bool: the worker thread writes it
+	 * as well as the control thread, and @c volatile is neither a memory
+	 * barrier nor a Zephyr cross-thread primitive.
 	 */
-	volatile bool nodes_open;
-	/* Worker thread created and not yet returned; the worker clears it on
-	 * the way out so is_running() reflects real liveness.
+	atomic_t state;
+
+	/* Worker thread exit request, and deliberately *not* a state value.
+	 *
+	 * "Leave the loop" is a request rather than a place: it applies to
+	 * every state that holds a worker thread, so folding it into the state
+	 * would double the enum and reintroduce exactly the unreachable
+	 * combinations the state above removes. Keeping it apart is also what
+	 * lets the worker compare-and-swap its own moves without ever
+	 * overwriting a pending audio_pipeline_join().
+	 *
+	 * Set only by audio_pipeline_join(), cleared by audio_pipeline_init()
+	 * and by the audio_pipeline_start() that creates the thread.
 	 */
-	volatile bool running;
-	/* Worker thread is pulling frames. */
-	volatile bool playing;
-	/* Worker thread must return. */
-	volatile bool quit;
+	atomic_t quit_request;
 };
 
 /**
@@ -159,6 +206,11 @@ bool audio_pipeline_config_is_valid(const struct audio_pipeline_config *config);
  * of its built-ins keeps the configuration and pointers of its previous life
  * rather than being rebound to the new caller's.
  *
+ * The bound format is cleared (spec §8.1): re-initialising rebinds the instance
+ * to a new configuration and sink, and a format carried over from its previous
+ * life would be a stale default nobody chose. audio_pipeline_start() reports
+ * @c -ENODATA until audio_pipeline_set_format() is called again.
+ *
  * @retval 0 on success
  * @retval -EINVAL on a NULL argument or an invalid configuration
  * @retval -EBUSY if the worker thread of this instance is still running, or if
@@ -169,7 +221,50 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
 			struct audio_node *sink);
 
 /**
+ * @brief Bind the one format this pipeline runs at.
+ *
+ * @p fmt is copied into pipeline-owned storage, so the caller's struct may be a
+ * temporary. This is the *only* way to bind a format: sample rate and channel
+ * count are pipeline-wide, declared top-down by the application, and no node
+ * infers them from its peers (spec §5.2).
+ *
+ * audio_pipeline_start() installs the bound format on every node before it
+ * opens that node, and a node that cannot deliver or accept it fails its open()
+ * - v1 has no resampler and no channel mapper, so a mismatch is refused rather
+ * than converted.
+ *
+ * Legal only while the node chain is closed: before the first
+ * audio_pipeline_start(), or after audio_pipeline_join(). Nodes read the format
+ * in open() and hold it until they are closed, so replacing it underneath an
+ * open chain would leave them with a stale one.
+ *
+ * Control thread only, like every other @c audio_pipeline_* entry point
+ * (spec §3.3). The worker thread never reads the bound format, which is why
+ * this needs no lock.
+ *
+ * @param pipeline Initialised pipeline instance.
+ * @param fmt      Format to copy in; @c sample_rate_hz and @c channels must be
+ *                 non-zero.
+ *
+ * @retval 0 on success
+ * @retval -EINVAL on a NULL argument, on a pipeline that is not initialised, or
+ *         on a format no node could satisfy
+ * @retval -EBUSY while the node chain is open, whether the pipeline is playing
+ *         or merely idle
+ */
+int audio_pipeline_set_format(struct audio_pipeline *pipeline,
+			      const struct audio_stream_config *fmt);
+
+/**
  * @brief Open the node chain and create the worker thread.
+ *
+ * The bound format is installed on each node immediately before that node is
+ * opened (spec §5.2), so a node validates it from @c audio_node.pipeline_format
+ * inside its own open(). A pipeline with no bound format is refused with
+ * @c -ENODATA before anything is claimed and before a thread exists - distinct
+ * from the @c -EINVAL of a malformed configuration, so "you never called
+ * audio_pipeline_set_format()" cannot be confused with "your configuration is
+ * wrong".
  *
  * Nodes are opened sink first, then walking @c upstream. If a node's open()
  * fails, the nodes already opened are closed again, an
@@ -187,9 +282,11 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
  *
  * @retval 0 on success
  * @retval -EINVAL if the pipeline was not initialised
+ * @retval -ENODATA if no format was bound with audio_pipeline_set_format()
  * @retval -EBUSY if another instance has taken over a built-in resource this
  *         one was joined out of
  * @retval -ELOOP if the upstream chain exceeds the supported depth
+ * @retval -ENOTSUP if a node cannot deliver or accept the bound format
  * @retval <0 the first node open() error
  */
 int audio_pipeline_start(struct audio_pipeline *pipeline);
@@ -227,11 +324,23 @@ int audio_pipeline_stop(struct audio_pipeline *pipeline);
  * hand-rolled pipeline can claim it. The restart above then reclaims it, and
  * fails with @c -EBUSY if another instance got there first. Between the join
  * and that successful reclaim the instance owns nothing, even though it still
- * points at the built-ins: do not call audio_pipeline_process_frame() or
- * audio_pipeline_get_event() on it in that window, or it will read and write
- * storage the new owner is using. An instance running on the built-ins must
- * therefore be joined before it goes out of scope - nothing else gives them
- * back.
+ * points at the built-ins.
+ *
+ * The event queue is defined in that window rather than left to chance:
+ * audio_pipeline_get_event() keeps delivering the events already queued - the
+ * ERROR event of a failing close() included - until another instance claims the
+ * built-in slots, and returns @c -EPERM from then on instead of reading the new
+ * owner's ring. A restart rebinds the queue, so an instance that comes back
+ * after another one has used the slots starts from an empty queue rather than
+ * inheriting what that instance left behind. An instance with its own event
+ * slots (AUDIO_PIPELINE_DEFINE()) is never affected: nothing else can reach
+ * them, and its queue survives join() untouched.
+ *
+ * audio_pipeline_process_frame() gets no such guard - do not call it on a
+ * joined instance, or it will read and write the frame buffer the new owner is
+ * using. An instance running on the built-ins must be joined before it goes out
+ * of scope - nothing else gives them back, and an abandoned one locks every
+ * later hand-rolled pipeline out with @c -EBUSY.
  *
  * @retval 0 on success
  * @retval -EINVAL if the pipeline was not initialised

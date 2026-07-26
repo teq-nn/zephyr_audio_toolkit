@@ -37,6 +37,8 @@
  * ======================================================================
  */
 
+#define TEST_EVENT_TIMEOUT K_MSEC(500)
+
 static void test_event_handler(const struct audio_pipeline_event *event, void *user_data)
 {
 	ARG_UNUSED(event);
@@ -85,21 +87,23 @@ ZTEST(audio_pipeline, test_pipeline_start_play_stop_join)
 		.upstream = &source,
 		.state = NULL,
 	};
+	struct audio_stream_config fmt = {
+		.sample_rate_hz = 44100U,
+		.channels = 2U,
+		.valid_bits_per_sample = 24U,
+		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+	};
 	struct audio_pipeline_config cfg = {
-		.stream = {
-			.sample_rate_hz = 44100U,
-			.channels = 2U,
-			.valid_bits_per_sample = 24U,
-			.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-		},
 		.frame_samples = CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES,
 		.event_cb = test_event_handler,
 		.event_user_data = NULL,
 	};
 	struct audio_pipeline pipeline = {0};
+	struct audio_pipeline_event evt;
 
 	zassert_true(audio_pipeline_config_is_valid(&cfg), "config must be valid");
 	zassert_equal(audio_pipeline_init(&pipeline, &cfg, &sink), 0, "init failed");
+	zassert_equal(audio_pipeline_set_format(&pipeline, &fmt), 0, "set_format failed");
 	zassert_equal(audio_pipeline_start(&pipeline), 0, "start failed");
 	zassert_true(audio_pipeline_is_running(&pipeline), "worker thread missing");
 
@@ -107,7 +111,14 @@ ZTEST(audio_pipeline, test_pipeline_start_play_stop_join)
 	 * the thread survives the EOF.
 	 */
 	zassert_equal(audio_pipeline_play(&pipeline), 0, "play failed");
-	k_msleep(20);
+
+	/* Wait for the event rather than for the clock. The worker leaves the
+	 * playing state before it publishes, so an EOF on the queue means the
+	 * transition is already done.
+	 */
+	zassert_equal(audio_pipeline_get_event(&pipeline, &evt, TEST_EVENT_TIMEOUT), 0,
+		      "no EOF event");
+	zassert_equal(evt.type, AUDIO_PIPELINE_EVENT_EOF, "expected an EOF event");
 	zassert_true(audio_pipeline_is_running(&pipeline), "EOF killed the worker thread");
 	zassert_false(audio_pipeline_is_playing(&pipeline), "still playing after EOF");
 
@@ -166,16 +177,27 @@ ZTEST_SUITE(audio_pipeline, NULL, NULL, NULL, NULL, NULL);
 #define NEG_FRAME_SAMPLES 16
 
 static const struct audio_pipeline_config neg_config = {
-	.stream = {
-		.sample_rate_hz = 48000U,
-		.channels = 2U,
-		.valid_bits_per_sample = 16U,
-		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-	},
 	.frame_samples = NEG_FRAME_SAMPLES,
 	.event_cb = NULL,
 	.event_user_data = NULL,
 };
+
+/* What the fixtures are written at, so the file nodes accept them: the reader
+ * refuses a file that disagrees with the bound format and the writer emits
+ * exactly this into its header (spec §5.2).
+ */
+static const struct audio_stream_config neg_format = {
+	.sample_rate_hz = 48000U,
+	.channels = 2U,
+	.valid_bits_per_sample = 16U,
+	.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+};
+
+static void bind_format(struct audio_pipeline *pipeline)
+{
+	zassert_equal(audio_pipeline_set_format(pipeline, &neg_format), 0,
+		      "binding the pipeline format failed");
+}
 
 /* Corrupt header -> reader open() fails -> ERROR. */
 AUDIO_FILE_READER_NODE_DEFINE(neg_bad_reader, AUDIO_TEST_PATH("neg_bad.wav"));
@@ -249,6 +271,7 @@ ZTEST(audio_pipeline_negative, test_source_corrupt_header_emits_error_event)
 
 	zassert_equal(audio_pipeline_init(&neg_bad_pipeline, &neg_config, &neg_bad_writer), 0,
 		      "init failed");
+	bind_format(&neg_bad_pipeline);
 
 	/* start() opens the chain sink-first, then upstream; the reader's open()
 	 * rejects the header, so start() fails and no worker thread is created.
@@ -289,6 +312,7 @@ ZTEST(audio_pipeline_negative, test_source_truncated_file_reports_clean_eof)
 
 	zassert_equal(audio_pipeline_init(&neg_trunc_pipeline, &neg_config, &neg_trunc_writer), 0,
 		      "init failed");
+	bind_format(&neg_trunc_pipeline);
 	zassert_equal(audio_pipeline_start(&neg_trunc_pipeline), 0, "start failed");
 	zassert_equal(audio_pipeline_play(&neg_trunc_pipeline), 0, "play failed");
 
@@ -348,6 +372,7 @@ ZTEST(audio_pipeline_negative, test_processing_error_emits_error_event_with_code
 
 	zassert_equal(audio_pipeline_init(&neg_fault_pipeline, &neg_config, &neg_fault_writer), 0,
 		      "init failed");
+	bind_format(&neg_fault_pipeline);
 	zassert_equal(audio_pipeline_start(&neg_fault_pipeline), 0, "start failed");
 	zassert_equal(audio_pipeline_play(&neg_fault_pipeline), 0, "play failed");
 
@@ -384,6 +409,7 @@ ZTEST(audio_pipeline_negative, test_source_epipe_through_filter_is_not_an_eof)
 
 	zassert_equal(audio_pipeline_init(&neg_epipe_pipeline, &neg_config, &neg_epipe_sink), 0,
 		      "init failed");
+	bind_format(&neg_epipe_pipeline);
 	zassert_equal(audio_pipeline_start(&neg_epipe_pipeline), 0, "start failed");
 	zassert_equal(audio_pipeline_play(&neg_epipe_pipeline), 0, "play failed");
 
@@ -417,6 +443,7 @@ ZTEST(audio_pipeline_negative, test_sink_epipe_is_not_an_eof)
 	zassert_equal(audio_pipeline_init(&neg_sink_epipe_pipeline, &neg_config,
 					  &neg_sink_epipe_sink),
 		      0, "init failed");
+	bind_format(&neg_sink_epipe_pipeline);
 	zassert_equal(audio_pipeline_start(&neg_sink_epipe_pipeline), 0, "start failed");
 	zassert_equal(audio_pipeline_play(&neg_sink_epipe_pipeline), 0, "play failed");
 
@@ -456,6 +483,11 @@ ZTEST(audio_pipeline_negative, test_sink_rejects_data_chunk_overflow)
 	audio_fake_source_reset(&neg_efbig_source_state);
 	neg_efbig_source_state.frames_total = AUDIO_FAKE_ENDLESS;
 	neg_efbig_source_state.chunk = 2U; /* one stereo frame per call */
+
+	/* Opened without a pipeline, so the format a pipeline would have
+	 * installed is installed by hand: the sink resolves no defaults.
+	 */
+	neg_efbig_writer.pipeline_format = &neg_format;
 
 	zassert_equal(audio_node_open(&neg_efbig_writer), 0, "open failed");
 

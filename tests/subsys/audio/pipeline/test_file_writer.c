@@ -11,7 +11,6 @@
  */
 
 #include <errno.h>
-#include <string.h>
 
 #include <zephyr/fs/fs.h>
 #include <zephyr/kernel.h>
@@ -37,9 +36,11 @@
  */
 #define WRITER_RIFF_SIZE_OFFSET 4U
 
-/* Defaults the sink applies to a zero-initialised audio_stream_config. */
-#define WRITER_DEFAULT_RATE 48000U
-#define WRITER_DEFAULT_CHANNELS 2U
+/* The format the suite binds unless a case needs a different one. The sink
+ * resolves no defaults, so this is what every file below is expected to declare.
+ */
+#define WRITER_RATE 48000U
+#define WRITER_CHANNELS 2U
 
 #define WRITER_FRAME_SAMPLES 16
 
@@ -161,11 +162,35 @@ static uint16_t payload_u16(size_t i)
 	return sys_get_le16(&file_buf[WRITER_HEADER_SIZE + i * sizeof(int16_t)]);
 }
 
+/*
+ * Nodes the cases below open directly, without a pipeline. A sink takes its
+ * format from audio_node.pipeline_format and resolves no defaults (spec §10.2),
+ * so the fixture installs by hand what audio_pipeline_start() would install.
+ */
+static struct audio_node *const direct_writers[] = {
+	&hdr_writer,    &conv_writer,   &fmt_writer,    &eof_writer,
+	&abort_writer,  &reopen_writer, &odd_writer,    &depth_writer,
+	&chan_writer,   &nodir_writer,  &orphan_writer, &unopened_writer,
+};
+
+static const struct audio_stream_config writer_format = {
+	.sample_rate_hz = WRITER_RATE,
+	.channels = WRITER_CHANNELS,
+	.valid_bits_per_sample = 16U,
+	.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+};
+
 static void writer_before(void *fixture)
 {
+	size_t i;
+
 	ARG_UNUSED(fixture);
 
 	zassert_equal(audio_test_fs_mount(), 0, "fixture filesystem did not mount");
+
+	for (i = 0; i < ARRAY_SIZE(direct_writers); i++) {
+		direct_writers[i]->pipeline_format = &writer_format;
+	}
 }
 
 /* -------------------------------------------------------------------------
@@ -196,8 +221,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_writes_valid_wav)
 	zassert_equal(audio_node_close(&hdr_writer), 0, "close failed");
 	zassert_false(state->file_open, "close() did not release the handle");
 
-	assert_valid_wav(AUDIO_TEST_PATH("w_hdr.wav"), WRITER_DEFAULT_RATE,
-			 WRITER_DEFAULT_CHANNELS,
+	assert_valid_wav(AUDIO_TEST_PATH("w_hdr.wav"), WRITER_RATE, WRITER_CHANNELS,
 			 (uint32_t)(ARRAY_SIZE(narrow_in) * sizeof(int16_t)));
 }
 
@@ -208,6 +232,12 @@ ZTEST(audio_pipeline_file_writer, test_sink_writes_configured_format)
 		.data = buf,
 		.capacity = ARRAY_SIZE(buf),
 	};
+	static const struct audio_stream_config mono_44100 = {
+		.sample_rate_hz = 44100U,
+		.channels = 1U,
+		.valid_bits_per_sample = 16U,
+		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+	};
 	struct audio_file_writer_state *state = fmt_writer.state;
 	size_t produced = 0;
 
@@ -215,13 +245,10 @@ ZTEST(audio_pipeline_file_writer, test_sink_writes_configured_format)
 	fmt_source_state.sample_count = 6U;
 	fmt_source_state.chunk = 0;
 
-	/* Mono at 44.1 kHz: the header has to follow the state, not the
-	 * defaults, or a reader would replay the file at the wrong speed.
+	/* Mono at 44.1 kHz: the header has to follow the bound format, or a
+	 * reader would replay the file at the wrong speed.
 	 */
-	state->fmt.sample_rate_hz = 44100U;
-	state->fmt.channels = 1U;
-	state->fmt.valid_bits_per_sample = 16U;
-	state->fmt.format = AUDIO_SAMPLE_FORMAT_S32_LE;
+	fmt_writer.pipeline_format = &mono_44100;
 
 	zassert_equal(audio_node_open(&fmt_writer), 0, "open failed");
 	zassert_equal(audio_node_process(&fmt_writer, &view, &produced), 0, "process failed");
@@ -230,36 +257,85 @@ ZTEST(audio_pipeline_file_writer, test_sink_writes_configured_format)
 	assert_valid_wav(AUDIO_TEST_PATH("w_fmt.wav"), 44100U, 1U,
 			 (uint32_t)(6U * sizeof(int16_t)));
 
-	memset(&state->fmt, 0, sizeof(state->fmt));
+	/* The node keeps the resolved format observable, as a copy of the
+	 * pipeline's rather than as a second source of truth.
+	 */
+	zassert_equal(state->fmt.sample_rate_hz, 44100U, "the sink did not record its rate");
+	zassert_equal(state->fmt.channels, 1U, "the sink did not record its channel count");
+}
+
+/** @brief Fail the calling test unless @p path is absent from the filesystem. */
+static void assert_no_file(const char *path)
+{
+	struct fs_dirent entry;
+
+	zassert_equal(fs_stat(path, &entry), -ENOENT, "%s: a refused open() left a file behind",
+		      path);
 }
 
 ZTEST(audio_pipeline_file_writer, test_sink_rejects_unsupported_depth)
 {
+	static const struct audio_stream_config deep_format = {
+		.sample_rate_hz = WRITER_RATE,
+		.channels = WRITER_CHANNELS,
+		/* v1 narrows to 16 bit only; the spec's 24 bit path is not
+		 * built, so a bound format asking for it has to fail loudly.
+		 */
+		.valid_bits_per_sample = 24U,
+		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+	};
 	struct audio_file_writer_state *state = depth_writer.state;
 	int ret;
 
-	/* v1 narrows to 16 bit only; the spec's 24 bit path is not built. */
-	state->fmt.valid_bits_per_sample = 24U;
+	depth_writer.pipeline_format = &deep_format;
 
 	ret = audio_node_open(&depth_writer);
 	zassert_equal(ret, -ENOTSUP, "a 24 bit sink must be rejected with -ENOTSUP, got %d", ret);
 	zassert_false(state->file_open, "a failed open() must not leave a handle");
 
-	memset(&state->fmt, 0, sizeof(state->fmt));
+	/* Refused before the file is created (spec §10.2), so an unsupported
+	 * bound format leaves nothing on disk to mislead a reader.
+	 */
+	assert_no_file(AUDIO_TEST_PATH("w_depth.wav"));
 }
 
 ZTEST(audio_pipeline_file_writer, test_sink_rejects_unsupported_channels)
 {
+	static const struct audio_stream_config wide_format = {
+		.sample_rate_hz = WRITER_RATE,
+		.channels = 3U,
+		.valid_bits_per_sample = 16U,
+		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+	};
 	struct audio_file_writer_state *state = chan_writer.state;
 	int ret;
 
-	state->fmt.channels = 3U;
+	chan_writer.pipeline_format = &wide_format;
 
 	ret = audio_node_open(&chan_writer);
 	zassert_equal(ret, -ENOTSUP, "v1 writes 1 or 2 channels, got %d for 3", ret);
 	zassert_false(state->file_open, "a failed open() must not leave a handle");
 
-	memset(&state->fmt, 0, sizeof(state->fmt));
+	assert_no_file(AUDIO_TEST_PATH("w_chan.wav"));
+}
+
+ZTEST(audio_pipeline_file_writer, test_sink_requires_a_bound_format)
+{
+	struct audio_file_writer_state *state = depth_writer.state;
+	int ret;
+
+	/* The 48 kHz / 2 channel fallback is gone: a format is always bound
+	 * before start() runs, so a sink guessing one would be exactly the
+	 * mislabelling the top-down binding removes.
+	 */
+	depth_writer.pipeline_format = NULL;
+
+	ret = audio_node_open(&depth_writer);
+	zassert_equal(ret, -EINVAL, "a sink without a bound format must fail, got %d", ret);
+	zassert_not_equal(ret, -EPIPE, "a sink must never return -EPIPE; that means EOF");
+	zassert_false(state->file_open, "a failed open() must not leave a handle");
+
+	assert_no_file(AUDIO_TEST_PATH("w_depth.wav"));
 }
 
 ZTEST(audio_pipeline_file_writer, test_sink_rejects_unwritable_path)
@@ -307,8 +383,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_close_finalises_and_allows_reopen)
 			      round);
 		zassert_equal(state->data_bytes, 0U, "close() did not reset the byte count");
 
-		assert_valid_wav(AUDIO_TEST_PATH("w_reopen.wav"), WRITER_DEFAULT_RATE,
-				 WRITER_DEFAULT_CHANNELS,
+		assert_valid_wav(AUDIO_TEST_PATH("w_reopen.wav"), WRITER_RATE, WRITER_CHANNELS,
 				 (uint32_t)(round * 2U * sizeof(int16_t)));
 	}
 
@@ -351,8 +426,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_narrows_s32_to_s16)
 
 	zassert_equal(audio_node_close(&conv_writer), 0, "close failed");
 
-	assert_valid_wav(AUDIO_TEST_PATH("w_conv.wav"), WRITER_DEFAULT_RATE,
-			 WRITER_DEFAULT_CHANNELS,
+	assert_valid_wav(AUDIO_TEST_PATH("w_conv.wav"), WRITER_RATE, WRITER_CHANNELS,
 			 (uint32_t)(ARRAY_SIZE(narrow_in) * sizeof(int16_t)));
 
 	for (i = 0; i < ARRAY_SIZE(narrow_in); i++) {
@@ -389,8 +463,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_rejects_partial_sample_frame)
 	zassert_equal(state->data_bytes, 0U, "nothing may have been appended");
 
 	zassert_equal(audio_node_close(&odd_writer), 0, "close failed");
-	assert_valid_wav(AUDIO_TEST_PATH("w_odd.wav"), WRITER_DEFAULT_RATE,
-			 WRITER_DEFAULT_CHANNELS, 0U);
+	assert_valid_wav(AUDIO_TEST_PATH("w_odd.wav"), WRITER_RATE, WRITER_CHANNELS, 0U);
 }
 
 /* -------------------------------------------------------------------------
@@ -433,12 +506,10 @@ ZTEST(audio_pipeline_file_writer, test_sink_propagates_eof_without_appending)
 	 * application that only waits for the EOF event already has a valid
 	 * file.
 	 */
-	assert_valid_wav(AUDIO_TEST_PATH("w_eof.wav"), WRITER_DEFAULT_RATE,
-			 WRITER_DEFAULT_CHANNELS, expected);
+	assert_valid_wav(AUDIO_TEST_PATH("w_eof.wav"), WRITER_RATE, WRITER_CHANNELS, expected);
 
 	zassert_equal(audio_node_close(&eof_writer), 0, "close failed");
-	assert_valid_wav(AUDIO_TEST_PATH("w_eof.wav"), WRITER_DEFAULT_RATE,
-			 WRITER_DEFAULT_CHANNELS, expected);
+	assert_valid_wav(AUDIO_TEST_PATH("w_eof.wav"), WRITER_RATE, WRITER_CHANNELS, expected);
 }
 
 ZTEST(audio_pipeline_file_writer, test_sink_without_upstream_is_a_wiring_error)
@@ -461,8 +532,7 @@ ZTEST(audio_pipeline_file_writer, test_sink_without_upstream_is_a_wiring_error)
 	zassert_equal(produced, 0U, "a failing process() must not claim samples");
 
 	zassert_equal(audio_node_close(&orphan_writer), 0, "close failed");
-	assert_valid_wav(AUDIO_TEST_PATH("w_orphan.wav"), WRITER_DEFAULT_RATE,
-			 WRITER_DEFAULT_CHANNELS, 0U);
+	assert_valid_wav(AUDIO_TEST_PATH("w_orphan.wav"), WRITER_RATE, WRITER_CHANNELS, 0U);
 }
 
 ZTEST(audio_pipeline_file_writer, test_sink_process_without_open_fails)
@@ -543,12 +613,6 @@ ZTEST(audio_pipeline_file_writer, test_sink_reports_write_error_and_leaves_empty
 ZTEST(audio_pipeline_file_writer, test_sink_open_failure_emits_error_event)
 {
 	static const struct audio_pipeline_config cfg = {
-		.stream = {
-			.sample_rate_hz = 48000U,
-			.channels = 2U,
-			.valid_bits_per_sample = 16U,
-			.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-		},
 		.frame_samples = WRITER_FRAME_SAMPLES,
 		.event_cb = NULL,
 		.event_user_data = NULL,
@@ -557,6 +621,8 @@ ZTEST(audio_pipeline_file_writer, test_sink_open_failure_emits_error_event)
 	int ret;
 
 	zassert_equal(audio_pipeline_init(&event_pipeline, &cfg, &event_writer), 0, "init failed");
+	zassert_equal(audio_pipeline_set_format(&event_pipeline, &writer_format), 0,
+		      "binding the pipeline format failed");
 
 	ret = audio_pipeline_start(&event_pipeline);
 	zassert_true(ret < 0, "start() must fail when the sink cannot create its file");
@@ -578,12 +644,6 @@ ZTEST(audio_pipeline_file_writer, test_sink_open_failure_emits_error_event)
 ZTEST(audio_pipeline_file_writer, test_sink_writes_file_driven_by_pipeline)
 {
 	static const struct audio_pipeline_config cfg = {
-		.stream = {
-			.sample_rate_hz = 48000U,
-			.channels = 2U,
-			.valid_bits_per_sample = 16U,
-			.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-		},
 		.frame_samples = WRITER_FRAME_SAMPLES,
 		.event_cb = NULL,
 		.event_user_data = NULL,
@@ -604,6 +664,8 @@ ZTEST(audio_pipeline_file_writer, test_sink_writes_file_driven_by_pipeline)
 		      0, "could not write the source fixture");
 
 	zassert_equal(audio_pipeline_init(&writer_pipeline, &cfg, &pipe_writer), 0, "init failed");
+	zassert_equal(audio_pipeline_set_format(&writer_pipeline, &writer_format), 0,
+		      "binding the pipeline format failed");
 	zassert_equal(audio_pipeline_start(&writer_pipeline), 0, "start failed");
 	zassert_equal(audio_pipeline_play(&writer_pipeline), 0, "play failed");
 

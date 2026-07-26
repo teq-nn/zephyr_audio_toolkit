@@ -47,7 +47,9 @@ struct audio_file_reader_state {
 	 * Format the node delivers: the container is always
 	 * ::AUDIO_SAMPLE_FORMAT_S32_LE, while @c valid_bits_per_sample carries
 	 * the on-disk resolution of the WAV payload (spec §5.2/§5.3).
-	 * Populated by open() from the parsed header.
+	 * Populated by open() from the parsed header, which is also what open()
+	 * checks against the pipeline's bound format: a file that disagrees is
+	 * refused with @c -ENOTSUP rather than converted (spec §10.1).
 	 */
 	struct audio_stream_config fmt;
 	/** Payload bytes the parsed @c data chunk still promises. */
@@ -69,14 +71,17 @@ struct audio_file_writer_state {
 	/** Destination file, owned by the definition macro. */
 	const char *path;
 	/**
-	 * Format the sink writes to disk. Optional: every zero field takes its
-	 * default in open() (48000 Hz, 2 channels, 16 bit), so an application
-	 * that is happy with the v1 defaults leaves the whole struct alone.
+	 * Format the sink wrote to disk, as a copy of the pipeline's bound
+	 * format (spec §10.2). Populated by open() from
+	 * @c audio_node.pipeline_format and read-only to the application: it is
+	 * an observation, not an input, and the node resolves no defaults of its
+	 * own - a sink guessing a rate or a channel count is the mislabelling
+	 * the top-down binding exists to prevent.
 	 *
 	 * The container field describes the *pipeline* side and is always
 	 * ::AUDIO_SAMPLE_FORMAT_S32_LE; @c valid_bits_per_sample is the on-disk
-	 * resolution and v1 supports 16 only (spec §5.2/§5.3). Set it before
-	 * open(); the node does not look at it again afterwards.
+	 * resolution and v1 supports 16 only (spec §5.2/§5.3), so open() refuses
+	 * anything else with @c -ENOTSUP.
 	 */
 	struct audio_stream_config fmt;
 

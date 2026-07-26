@@ -8,6 +8,11 @@
  * join() hands the built-ins back, and start() will not pick up resources the
  * instance has since given away.
  *
+ * The event queue needs the same care on the way *out*, because
+ * audio_pipeline_get_event() is reachable long after join() gave the slots back
+ * (issue #20): once another instance has claimed them the read is refused, and a
+ * restart rebinds the queue instead of trusting the binding init() made.
+ *
  * The two instances are deliberately distinguishable - different frame sizes,
  * different sample patterns, different frame counts - so a test cannot pass
  * merely because two pipelines running on one buffer happen to look alike.
@@ -42,6 +47,13 @@
 #define FIRST_PATTERN 0x11111111
 #define SECOND_PATTERN 0x22222222
 
+/* Scripted open() failures, one per chain and different from each other, so an
+ * ERROR event names the instance that produced it. Neither collides with a code
+ * the event API returns on its own (-EINVAL, -EPERM, -ENOMSG, -EAGAIN).
+ */
+#define FIRST_OPEN_ERR (-EACCES)
+#define SECOND_OPEN_ERR (-ENOSPC)
+
 #define TEST_EVENT_TIMEOUT K_MSEC(2000)
 
 AUDIO_FAKE_SOURCE_DEFINE(first_source);
@@ -67,24 +79,29 @@ static struct audio_pipeline_event own_event_slots[AUDIO_PIPELINE_EVENT_QUEUE_DE
 static K_THREAD_STACK_DEFINE(own_stack, CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE);
 
 static const struct audio_pipeline_config first_config = {
-	.stream = {
-		.sample_rate_hz = 48000U,
-		.channels = 2U,
-		.valid_bits_per_sample = 24U,
-		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-	},
 	.frame_samples = FIRST_FRAME_SAMPLES,
 };
 
 static const struct audio_pipeline_config second_config = {
-	.stream = {
-		.sample_rate_hz = 48000U,
-		.channels = 2U,
-		.valid_bits_per_sample = 24U,
-		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-	},
 	.frame_samples = SECOND_FRAME_SAMPLES,
 };
+
+/* The format every instance here runs at; the fakes accept anything, so the
+ * suite only needs one. init() clears the binding (spec §8.1), so a successful
+ * init() is always followed by a bind_format().
+ */
+static const struct audio_stream_config builtin_format = {
+	.sample_rate_hz = 48000U,
+	.channels = 2U,
+	.valid_bits_per_sample = 24U,
+	.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+};
+
+static void bind_format(struct audio_pipeline *pipeline)
+{
+	zassert_equal(audio_pipeline_set_format(pipeline, &builtin_format), 0,
+		      "binding the pipeline format failed");
+}
 
 /* Wipe one chain and give its source and sink a shared pattern, so a frame
  * written by the other chain cannot pass the sink's check.
@@ -136,6 +153,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_refuse_a_second_c
 {
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
 	zassert_not_null(first_pipeline.stack, "no built-in stack installed");
 	zassert_not_null(first_pipeline.frame_buf, "no built-in frame buffer installed");
 	zassert_not_null(first_pipeline.event_slots, "no built-in event slots installed");
@@ -149,19 +167,27 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_refuse_a_second_c
 	zassert_is_null(second_pipeline.stack, "the refused instance kept a stack");
 	zassert_is_null(second_pipeline.frame_buf, "the refused instance kept a frame buffer");
 	zassert_is_null(second_pipeline.event_slots, "the refused instance kept event slots");
-	zassert_false(second_pipeline.initialized, "the refused instance was marked initialised");
+	/* Asked through the API rather than of a struct field: "not
+	 * initialised" is a lifecycle state, and audio_pipeline_stop() refusing
+	 * with -EINVAL is the only thing it means from outside. Every other
+	 * initialised state answers 0.
+	 */
+	zassert_equal(audio_pipeline_stop(&second_pipeline), -EINVAL,
+		      "the refused instance was marked initialised");
 }
 
 ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_allow_the_owner_to_reinitialise)
 {
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
 
 	/* Rebinding an instance to a new configuration or sink is a supported
 	 * move, so the owner must not lock itself out of its own built-ins.
 	 */
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the owner was refused the built-ins it already holds");
+	bind_format(&first_pipeline);
 
 	zassert_equal(audio_pipeline_init(&second_pipeline, &second_config, &second_sink), -EBUSY,
 		      "a rebind released the built-ins to another instance");
@@ -178,6 +204,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_are_claimed_per_r
 
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
 	zassert_equal_ptr(first_pipeline.stack, own_stack, "init() replaced the caller's stack");
 
 	/* Wants all three; two of them are taken, so it is refused. */
@@ -189,6 +216,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_are_claimed_per_r
 	 */
 	zassert_equal(audio_pipeline_init(&stack_only_pipeline, &second_config, &second_sink), 0,
 		      "an unclaimed built-in was refused because another one was taken");
+	bind_format(&stack_only_pipeline);
 	zassert_not_null(stack_only_pipeline.stack, "no built-in stack installed");
 	zassert_true(stack_only_pipeline.stack != own_stack,
 		     "the caller's own stack was handed to another instance");
@@ -209,6 +237,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_keep_the_first_cl
 
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
 	frame_buf = first_pipeline.frame_buf;
 	slots = first_pipeline.event_slots;
 
@@ -263,6 +292,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_return_to_the_poo
 
 	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
 		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
 	stack = first_pipeline.stack;
 	frame_buf = first_pipeline.frame_buf;
 	slots = first_pipeline.event_slots;
@@ -275,6 +305,7 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_return_to_the_poo
 	 */
 	zassert_equal(audio_pipeline_init(&second_pipeline, &second_config, &second_sink), 0,
 		      "join() did not release the built-ins");
+	bind_format(&second_pipeline);
 	zassert_equal_ptr(second_pipeline.stack, stack, "a second built-in stack appeared");
 	zassert_equal_ptr(second_pipeline.frame_buf, frame_buf,
 			  "a second built-in frame buffer appeared");
@@ -309,6 +340,131 @@ ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_return_to_the_poo
 		      "something else wrote into the new owner's frames");
 	zassert_equal(atomic_get(&second_sink_state.wrong_capacity), 0U,
 		      "the new owner ran at the previous owner's frame capacity");
+}
+
+ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_refuse_an_event_read_after_takeover)
+{
+	struct audio_pipeline_event event = {0};
+	int ret;
+
+	first_source_state.frames_total = FIRST_FRAMES;
+
+	/* The first instance runs a whole track and drains its own queue, so
+	 * anything it reads from here on can only have come from somewhere else.
+	 */
+	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
+		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
+	zassert_equal(audio_pipeline_start(&first_pipeline), 0, "start failed");
+	zassert_equal(audio_pipeline_play(&first_pipeline), 0, "play failed");
+
+	zassert_equal(audio_pipeline_get_event(&first_pipeline, &event, TEST_EVENT_TIMEOUT), 0,
+		      "no EOF event within the timeout");
+	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_EOF, "expected an EOF event, got type %d",
+		      (int)event.type);
+	zassert_equal(audio_pipeline_get_event(&first_pipeline, &event, K_NO_WAIT), -ENOMSG,
+		      "the first pipeline's queue was not empty");
+
+	zassert_equal(audio_pipeline_join(&first_pipeline), 0, "join failed");
+
+	/* Still readable while the slots are merely free: they hold nothing but
+	 * this instance's own events, which is what makes draining after a join
+	 * - the ERROR event of a failing close() included - a legal pattern.
+	 */
+	zassert_equal(audio_pipeline_get_event(&first_pipeline, &event, K_NO_WAIT), -ENOMSG,
+		      "a joined pipeline lost its queue before anyone else claimed it");
+
+	/* The second instance takes the very storage the first one still points
+	 * at and leaves an event only it could have produced: an ERROR carrying
+	 * its own open() failure, not the EOF the first chain publishes.
+	 */
+	second_source_state.open_ret = SECOND_OPEN_ERR;
+
+	zassert_equal(audio_pipeline_init(&second_pipeline, &second_config, &second_sink), 0,
+		      "join() did not release the built-in event slots");
+	bind_format(&second_pipeline);
+	zassert_equal_ptr(second_pipeline.event_slots, first_pipeline.event_slots,
+			  "the two instances did not end up on the same event storage");
+	zassert_equal(audio_pipeline_start(&second_pipeline), SECOND_OPEN_ERR,
+		      "the scripted open() failure did not reach start()");
+
+	/* Reading the joined instance must not reach the new owner's ring ... */
+	ret = audio_pipeline_get_event(&first_pipeline, &event, K_NO_WAIT);
+	zassert_equal(ret, -EPERM,
+		      "a joined pipeline read the queue's new owner: got %d (type %d, err %d)", ret,
+		      (int)event.type, event.err);
+
+	/* ... and must not have consumed from it either, which is the half a
+	 * plain "return an error" guard would miss.
+	 */
+	zassert_equal(audio_pipeline_get_event(&second_pipeline, &event, K_NO_WAIT), 0,
+		      "the new owner's event went missing");
+	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_ERROR,
+		      "expected an ERROR event, got type %d", (int)event.type);
+	zassert_equal(event.err, SECOND_OPEN_ERR, "the new owner's event carries err %d",
+		      event.err);
+}
+
+ZTEST(audio_pipeline_builtin_resources, test_builtin_resources_rebind_the_event_queue_on_restart)
+{
+	struct audio_pipeline_event event = {0};
+	int ret;
+
+	first_source_state.frames_total = FIRST_FRAMES;
+
+	zassert_equal(audio_pipeline_init(&first_pipeline, &first_config, &first_sink), 0,
+		      "the first hand-rolled pipeline was refused");
+	bind_format(&first_pipeline);
+
+	/* Leave an event of this instance's own in the queue and never drain it:
+	 * a control block that survives a takeover would deliver whatever sits
+	 * at its stale read position after the next owner has reset the ring.
+	 */
+	first_source_state.open_ret = FIRST_OPEN_ERR;
+	zassert_equal(audio_pipeline_start(&first_pipeline), FIRST_OPEN_ERR,
+		      "the scripted open() failure did not reach start()");
+	first_source_state.open_ret = 0;
+
+	zassert_equal(audio_pipeline_join(&first_pipeline), 0, "join failed");
+
+	/* The second instance claims the slots in between, re-initialises the
+	 * ring through a control block of its own, leaves a distinguishable
+	 * event behind and gives the slots back again.
+	 */
+	second_source_state.open_ret = SECOND_OPEN_ERR;
+
+	zassert_equal(audio_pipeline_init(&second_pipeline, &second_config, &second_sink), 0,
+		      "join() did not release the built-in event slots");
+	bind_format(&second_pipeline);
+	zassert_equal(audio_pipeline_start(&second_pipeline), SECOND_OPEN_ERR,
+		      "the scripted open() failure did not reach start()");
+	zassert_equal(audio_pipeline_join(&second_pipeline), 0, "join of the new owner failed");
+
+	/* init -> start -> join -> start: the restart takes the built-ins back
+	 * and must rebind the queue, because init() bound it a whole ownership
+	 * ago.
+	 */
+	zassert_equal(audio_pipeline_start(&first_pipeline), 0, "the restart was refused");
+
+	ret = audio_pipeline_get_event(&first_pipeline, &event, K_NO_WAIT);
+	zassert_equal(ret, -ENOMSG,
+		      "the restarted pipeline inherited a queued event: got %d (type %d, err %d)",
+		      ret, (int)event.type, event.err);
+
+	/* And the rebound queue still works - a restart that disabled the queue
+	 * instead of rebinding it would stop here.
+	 */
+	zassert_equal(audio_pipeline_play(&first_pipeline), 0, "play failed");
+	zassert_equal(audio_pipeline_get_event(&first_pipeline, &event, TEST_EVENT_TIMEOUT), 0,
+		      "no EOF event within the timeout after the restart");
+	zassert_equal(event.type, AUDIO_PIPELINE_EVENT_EOF, "expected an EOF event, got type %d",
+		      (int)event.type);
+	zassert_equal(event.err, 0, "the EOF event carries an error");
+
+	zassert_equal(atomic_get(&first_sink_state.frames_seen), FIRST_FRAMES,
+		      "the restarted pipeline lost frames");
+	zassert_equal(atomic_get(&first_sink_state.corrupt_frames), 0U,
+		      "something else wrote into the restarted pipeline's frames");
 }
 
 ZTEST_SUITE(audio_pipeline_builtin_resources, NULL, NULL, builtin_resources_before,

@@ -66,28 +66,33 @@ static void probe_event_cb(const struct audio_pipeline_event *event, void *user_
 }
 
 static const struct audio_pipeline_config config_a = {
-	.stream = {
-		.sample_rate_hz = 48000U,
-		.channels = 2U,
-		.valid_bits_per_sample = 24U,
-		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-	},
 	.frame_samples = PIPELINE_A_FRAME_SAMPLES,
 	.event_cb = probe_event_cb,
 	.event_user_data = &probe_a_eof,
 };
 
 static const struct audio_pipeline_config config_b = {
-	.stream = {
-		.sample_rate_hz = 48000U,
-		.channels = 2U,
-		.valid_bits_per_sample = 24U,
-		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-	},
 	.frame_samples = PIPELINE_B_FRAME_SAMPLES,
 	.event_cb = probe_event_cb,
 	.event_user_data = &probe_b_eof,
 };
+
+/* The format every instance in this suite runs at; the fakes accept anything,
+ * so one shared value is enough. init() clears the binding, so each init() is
+ * followed by a bind_format() (spec §8.1).
+ */
+static const struct audio_stream_config probe_format = {
+	.sample_rate_hz = 48000U,
+	.channels = 2U,
+	.valid_bits_per_sample = 24U,
+	.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+};
+
+static void bind_format(struct audio_pipeline *pipeline)
+{
+	zassert_equal(audio_pipeline_set_format(pipeline, &probe_format), 0,
+		      "binding the pipeline format failed");
+}
 
 AUDIO_PIPELINE_DECLARE(pipeline_a);
 AUDIO_PIPELINE_DEFINE(pipeline_a, PIPELINE_A_FRAME_SAMPLES,
@@ -188,8 +193,10 @@ ZTEST(audio_pipeline_static_define, test_pipeline_define_allocates_per_instance_
 
 	zassert_equal(audio_pipeline_init(&pipeline_a, &config_a, &probe_sink_a), 0,
 		      "init A failed");
+	bind_format(&pipeline_a);
 	zassert_equal(audio_pipeline_init(&pipeline_b, &config_b, &probe_sink_b), 0,
 		      "init B failed");
+	bind_format(&pipeline_b);
 
 	/* A zeroed instance still gets the built-in single-instance resources,
 	 * and those are not the ones the macro handed out.
@@ -197,6 +204,7 @@ ZTEST(audio_pipeline_static_define, test_pipeline_define_allocates_per_instance_
 	memset(&builtin_pipeline, 0, sizeof(builtin_pipeline));
 	zassert_equal(audio_pipeline_init(&builtin_pipeline, &config_a, &probe_sink_a), 0,
 		      "init of the built-in instance failed");
+	bind_format(&builtin_pipeline);
 
 	zassert_not_null(pipeline_a.stack, "macro left the stack unset");
 	zassert_not_null(pipeline_b.stack, "macro left the stack unset");
@@ -237,12 +245,15 @@ ZTEST(audio_pipeline_static_define, test_pipeline_define_allocates_per_instance_
 
 	zassert_equal(audio_pipeline_init(&pipeline_a, &config_a, &probe_sink_a), 0,
 		      "init A failed");
+	bind_format(&pipeline_a);
 	zassert_equal(audio_pipeline_init(&pipeline_b, &config_b, &probe_sink_b), 0,
 		      "init B failed");
+	bind_format(&pipeline_b);
 
 	memset(&builtin_pipeline, 0, sizeof(builtin_pipeline));
 	zassert_equal(audio_pipeline_init(&builtin_pipeline, &config_a, &probe_sink_a), 0,
 		      "init of the built-in instance failed");
+	bind_format(&builtin_pipeline);
 
 	zassert_not_null(slots_a, "macro left the event slots unset");
 	zassert_not_null(slots_b, "macro left the event slots unset");
@@ -273,8 +284,10 @@ ZTEST(audio_pipeline_static_define, test_pipeline_define_keeps_events_per_instan
 
 	zassert_equal(audio_pipeline_init(&pipeline_a, &config_a, &probe_sink_a), 0,
 		      "init A failed");
+	bind_format(&pipeline_a);
 	zassert_equal(audio_pipeline_init(&pipeline_b, &config_b, &probe_sink_b), 0,
 		      "init B failed");
+	bind_format(&pipeline_b);
 
 	/* Distinguishable events on purpose: two identical EOFs would still
 	 * look right if both instances wrote into one ring buffer, but two
@@ -334,6 +347,7 @@ ZTEST(audio_pipeline_static_define, test_pipeline_define_processes_on_its_own_bu
 
 	zassert_equal(audio_pipeline_init(&pipeline_a, &config_a, &probe_sink_a), 0,
 		      "init A failed");
+	bind_format(&pipeline_a);
 	zassert_equal(audio_pipeline_process_frame(&pipeline_a), 0, "frame not produced");
 
 	zassert_equal_ptr(atomic_ptr_get(&probe_sink_a_state.seen_buf), pipeline_a.frame_buf,
@@ -362,8 +376,10 @@ ZTEST(audio_pipeline_static_define, test_two_pipelines_run_concurrently)
 
 	zassert_equal(audio_pipeline_init(&pipeline_a, &config_a, &probe_sink_a), 0,
 		      "init A failed");
+	bind_format(&pipeline_a);
 	zassert_equal(audio_pipeline_init(&pipeline_b, &config_b, &probe_sink_b), 0,
 		      "init B failed");
+	bind_format(&pipeline_b);
 
 	zassert_equal(audio_pipeline_start(&pipeline_a), 0, "start A failed");
 	zassert_equal(audio_pipeline_start(&pipeline_b), 0, "start B failed");

@@ -84,6 +84,7 @@ static void file_reader_widen_s16(int32_t *buf, size_t samples)
 static int file_reader_open(struct audio_node *node)
 {
 	uint8_t header[AUDIO_WAV_HEADER_SCAN_SIZE];
+	const struct audio_stream_config *want;
 	struct audio_file_reader_state *state;
 	struct audio_wav_header wav;
 	ssize_t read;
@@ -144,20 +145,41 @@ static int file_reader_open(struct audio_node *node)
 		goto err_close;
 	}
 
+	/* The container is always S32_LE; the on-disk depth survives as the
+	 * effective resolution (spec §5.2). This is the file's *real* format and
+	 * it is what the bound format is checked against below.
+	 */
+	state->fmt.sample_rate_hz = wav.sample_rate_hz;
+	state->fmt.channels = (uint8_t)wav.channels;
+	state->fmt.valid_bits_per_sample = (uint8_t)wav.bits_per_sample;
+	state->fmt.format = AUDIO_SAMPLE_FORMAT_S32_LE;
+
+	/* Nodes validate, they do not adapt (spec §5.2/§10.1): v1 has no
+	 * resampler and no channel mapper, so a file whose rate or channel count
+	 * disagrees with the pipeline can only be refused. Handing it over
+	 * anyway is what produces a track playing at the wrong speed under a
+	 * header that describes something else.
+	 *
+	 * A node opened outside a pipeline has no bound format to disagree with;
+	 * the pipeline itself never opens one without it, because
+	 * audio_pipeline_start() refuses an unbound pipeline with -ENODATA.
+	 */
+	want = node->pipeline_format;
+	if (want != NULL && (state->fmt.sample_rate_hz != want->sample_rate_hz ||
+			     state->fmt.channels != want->channels)) {
+		LOG_ERR("%s: %u Hz, %u ch does not match the pipeline's %u Hz, %u ch", state->path,
+			state->fmt.sample_rate_hz, state->fmt.channels, want->sample_rate_hz,
+			want->channels);
+		ret = -ENOTSUP;
+		goto err_close;
+	}
+
 	ret = fs_seek(&state->file, (off_t)wav.data_offset, FS_SEEK_SET);
 	if (ret < 0) {
 		LOG_ERR("%s: seek to payload at %u failed (%d)", state->path, wav.data_offset, ret);
 		ret = audio_eof_safe_errno(ret);
 		goto err_close;
 	}
-
-	/* The container is always S32_LE; the on-disk depth survives as the
-	 * effective resolution (spec §5.2).
-	 */
-	state->fmt.sample_rate_hz = wav.sample_rate_hz;
-	state->fmt.channels = (uint8_t)wav.channels;
-	state->fmt.valid_bits_per_sample = (uint8_t)wav.bits_per_sample;
-	state->fmt.format = AUDIO_SAMPLE_FORMAT_S32_LE;
 
 	state->bytes_left = wav.data_size;
 	state->file_open = true;
@@ -168,6 +190,10 @@ static int file_reader_open(struct audio_node *node)
 	return 0;
 
 err_close:
+	/* A refused file leaves no format behind either: state->fmt is only
+	 * meaningful between a successful open() and its close().
+	 */
+	memset(&state->fmt, 0, sizeof(state->fmt));
 	(void)fs_close(&state->file);
 
 	return ret;

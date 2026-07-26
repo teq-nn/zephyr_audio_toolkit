@@ -82,19 +82,33 @@ keeps spec §13's resampler and mixer possible.
 - Container: `int32_t`, little endian, `AUDIO_SAMPLE_FORMAT_S32_LE`. Used everywhere inside the
   pipeline; filters only ever see 32-bit containers.
 - `valid_bits_per_sample` (16/24/32) carries the effective resolution alongside the container.
-- v1 is fixed at **2 channels**, interleaved: `L0, R0, L1, R1, ...`.
+- v1 supports **1 or 2 channels**, interleaved: `L0, R0, L1, R1, ...`.
 - Conversion happens at the edges: sources widen inbound PCM (`s16 << 16`, `s24 << 8`), sinks narrow
   it again (`(int16_t)(s32 >> 16)`).
-- Sample rate, channel count, and format are pipeline-wide and static for the whole runtime in v1.
+- Sample rate, channel count, and format are **pipeline-wide**, bound once by the application and
+  owned by the pipeline. Fixed for the duration of a run; rebindable between runs.
 
 ```c
-struct audio_format {
-    uint32_t sample_rate;
-    uint8_t  channels;              /* v1: always 2 */
+struct audio_stream_config {
+    uint32_t sample_rate_hz;
+    uint8_t  channels;              /* v1: 1 or 2 */
     uint8_t  valid_bits_per_sample; /* 16, 24, 32 */
     enum audio_sample_format format;
 };
 ```
+
+### Binding and matching (spec §5.2)
+
+- `audio_pipeline_set_format()` is the **only** way in — `audio_pipeline_config` has no format
+  field. `start()` returns `-ENODATA` if nothing was ever bound.
+- Legal only while the node chain is closed (before the first `start()`, after `join()`);
+  `-EBUSY` otherwise. Cleared by a fresh `init()`.
+- The pipeline installs the format on each node as `audio_node.pipeline_format` before calling that
+  node's `open()`. The `open`/`process`/`close` signatures are unchanged.
+- Nodes **validate, never adapt**: `sample_rate_hz` and `channels` must match exactly or `open()`
+  returns `-ENOTSUP`. `valid_bits_per_sample` is enforced per node (v1's file nodes are 16-bit
+  only). No resampler exists in v1, so refusing is the only option.
+- Control thread only (§3.3), and the worker never reads it — hence no mutex.
 
 ## 5. Frames, buffers, and static definition (manifest §5/§6/§9, spec §6)
 
@@ -110,7 +124,11 @@ struct audio_format {
   gives a second claimant `-EBUSY`, `join()` releases them, `start()` reclaims them (also `-EBUSY`
   if they were taken meanwhile). Need two pipelines at once? Use `AUDIO_PIPELINE_DEFINE()` for at
   least one of them. Join such an instance before discarding it — that is the only release — and do
-  not pull frames or read events on it between the join and the next successful init/start.
+  not pull frames on it between the join and the next successful init/start.
+- Reading events in that window is guarded rather than forbidden: what is already queued stays
+  readable after `join()`, `audio_pipeline_get_event()` switches to `-EPERM` once another instance
+  claims the built-in slots, and `start()` rebinds the queue so a restarted instance never inherits
+  the other one's events (spec §6.1/§8.3).
 
 ## 6. Lifecycle and API (spec §8)
 
@@ -119,12 +137,13 @@ int audio_pipeline_init(struct audio_pipeline *pl);
 int audio_pipeline_set_nodes(struct audio_pipeline *pl, struct audio_node *source,
                              struct audio_node **filters, size_t filter_count,
                              struct audio_node *sink);
-int audio_pipeline_set_format(struct audio_pipeline *pl, const struct audio_format *fmt);
+int audio_pipeline_set_format(struct audio_pipeline *pl, const struct audio_stream_config *fmt);
 
-int audio_pipeline_start(struct audio_pipeline *pl); /* create thread, open() all nodes */
-int audio_pipeline_play(struct audio_pipeline *pl);  /* playing = true  */
-int audio_pipeline_stop(struct audio_pipeline *pl);  /* playing = false, thread idles */
-int audio_pipeline_join(struct audio_pipeline *pl);  /* optional: end the thread */
+int audio_pipeline_start(struct audio_pipeline *pl); /* -ENODATA if no format bound;
+                                                        create thread, open() all nodes */
+int audio_pipeline_play(struct audio_pipeline *pl);  /* OPEN -> PLAYING */
+int audio_pipeline_stop(struct audio_pipeline *pl);  /* PLAYING -> OPEN, thread idles */
+int audio_pipeline_join(struct audio_pipeline *pl);  /* optional: end the thread, -> INIT */
 
 int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_event *evt,
                              k_timeout_t timeout);
@@ -136,7 +155,7 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 ## 7. EOF and errors (manifest §7/§8, spec §9)
 
 - **EOF**: the source reports `*out_size = 0` and returns `0`. Filters propagate it unchanged. The
-  sink detects it and tells the pipeline, which clears `playing` and emits
+  sink detects it and tells the pipeline, which moves `PLAYING` -> `OPEN` and emits
   `AUDIO_PIPELINE_EVENT_EOF`. Processing stops; **the thread keeps running** in idle mode.
 - **Error**: any negative return from `open()`, `process()`, or `close()`. `-EPIPE` is reserved for
   the pipeline's own end-of-stream signal, so no node may report it; the pull helper remaps it to

@@ -56,6 +56,20 @@ AUDIO_FILE_WRITER_NODE_DEFINE(rt_writer, &rt_reader, AUDIO_TEST_PATH("rt_out.wav
 AUDIO_PIPELINE_DEFINE(rt_pipeline, RT_FRAME_SAMPLES,
 		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
 
+/*
+ * The mono roundtrip: 44.1 kHz, one channel, which is neither the rate nor the
+ * channel count any node ever defaulted to. Its own chain, so it cannot inherit
+ * anything from the stereo case above.
+ */
+#define RT_MONO_SAMPLE_COUNT 37U
+#define RT_MONO_PAYLOAD_BYTES (RT_MONO_SAMPLE_COUNT * sizeof(int16_t))
+#define RT_MONO_FILE_BYTES (AUDIO_WAV_MIN_HEADER_SIZE + RT_MONO_PAYLOAD_BYTES)
+
+AUDIO_FILE_READER_NODE_DEFINE(rt_mono_reader, AUDIO_TEST_PATH("rt_mono.wav"));
+AUDIO_FILE_WRITER_NODE_DEFINE(rt_mono_writer, &rt_mono_reader, AUDIO_TEST_PATH("rt_mono_out.wav"));
+AUDIO_PIPELINE_DEFINE(rt_mono_pipeline, RT_FRAME_SAMPLES,
+		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
+
 /* file_reader -> half-gain filter -> file_writer: the transform guard. */
 AUDIO_FILE_READER_NODE_DEFINE(rt_gain_reader, AUDIO_TEST_PATH("rt_golden.wav"));
 AUDIO_GAIN_FILTER_NODE_DEFINE(rt_gain_filter, &rt_gain_reader, RT_HALF_GAIN_Q15);
@@ -64,15 +78,30 @@ AUDIO_PIPELINE_DEFINE(rt_gain_pipeline, RT_FRAME_SAMPLES,
 		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
 
 static const struct audio_pipeline_config rt_config = {
-	.stream = {
-		.sample_rate_hz = 48000U,
-		.channels = 2U,
-		.valid_bits_per_sample = 16U,
-		.format = AUDIO_SAMPLE_FORMAT_S32_LE,
-	},
 	.frame_samples = RT_FRAME_SAMPLES,
 	.event_cb = NULL,
 	.event_user_data = NULL,
+};
+
+/* What the stereo fixture is written at. The reader refuses a file that
+ * disagrees and the writer emits exactly this, so the format the application
+ * binds is the only one anywhere in the run (spec §5.2).
+ */
+static const struct audio_stream_config rt_format = {
+	.sample_rate_hz = 48000U,
+	.channels = 2U,
+	.valid_bits_per_sample = 16U,
+	.format = AUDIO_SAMPLE_FORMAT_S32_LE,
+};
+
+/* The mono case below: a rate and a channel count that are *not* the ones a
+ * deleted default would have produced.
+ */
+static const struct audio_stream_config rt_mono_format = {
+	.sample_rate_hz = 44100U,
+	.channels = 1U,
+	.valid_bits_per_sample = 16U,
+	.format = AUDIO_SAMPLE_FORMAT_S32_LE,
 };
 
 /* The golden payload, generated once per test. Interesting corners live at the
@@ -106,11 +135,14 @@ static void build_golden_samples(void)
 /* Drive a pipeline from a golden source until it reports a clean EOF, then join
  * so the sink's output file is finalised. Fails the test on any other outcome.
  */
-static void run_to_eof(struct audio_pipeline *pipeline, struct audio_node *sink)
+static void run_to_eof(struct audio_pipeline *pipeline, struct audio_node *sink,
+		       const struct audio_stream_config *format)
 {
 	struct audio_pipeline_event event;
 
 	zassert_equal(audio_pipeline_init(pipeline, &rt_config, sink), 0, "init failed");
+	zassert_equal(audio_pipeline_set_format(pipeline, format), 0,
+		      "binding the pipeline format failed");
 	zassert_equal(audio_pipeline_start(pipeline), 0, "start failed");
 	zassert_equal(audio_pipeline_play(pipeline), 0, "play failed");
 
@@ -149,7 +181,7 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_reproduces_golden_master)
 	size_t golden_len;
 	size_t out_len;
 
-	run_to_eof(&rt_pipeline, &rt_writer);
+	run_to_eof(&rt_pipeline, &rt_writer, &rt_format);
 
 	golden_len = audio_test_read_file(AUDIO_TEST_PATH("rt_golden.wav"), golden_buf,
 					  sizeof(golden_buf));
@@ -176,7 +208,7 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_gain_transforms_samples)
 	size_t out_len;
 	size_t i;
 
-	run_to_eof(&rt_gain_pipeline, &rt_gain_writer);
+	run_to_eof(&rt_gain_pipeline, &rt_gain_writer, &rt_format);
 
 	golden_len = audio_test_read_file(AUDIO_TEST_PATH("rt_golden.wav"), golden_buf,
 					  sizeof(golden_buf));
@@ -218,6 +250,69 @@ ZTEST(audio_pipeline_roundtrip, test_roundtrip_gain_transforms_samples)
 		zassert_equal(got, expect,
 			      "sample %zu: %d halved came back as 0x%04x, expected 0x%04x", i,
 			      golden_samples[i], got, expect);
+	}
+}
+
+/* -------------------------------------------------------------------------
+ * The bound format reaches the file on disk (spec §5.2, issue #18)
+ * ----------------------------------------------------------------------
+ */
+
+ZTEST(audio_pipeline_roundtrip, test_roundtrip_preserves_a_mono_44100_hz_track)
+{
+	static int16_t mono_samples[RT_MONO_SAMPLE_COUNT];
+	static uint8_t mono_payload[RT_MONO_PAYLOAD_BYTES];
+	struct audio_test_wav_spec spec = {
+		.channels = 1U,
+		.sample_rate_hz = 44100U,
+		.payload = mono_payload,
+		.payload_len = sizeof(mono_payload),
+	};
+	struct audio_wav_header wav;
+	size_t out_len;
+	size_t i;
+
+	/* Serialised explicitly, so the fixture is a little endian file on a big
+	 * endian host as well.
+	 */
+	for (i = 0; i < ARRAY_SIZE(mono_samples); i++) {
+		mono_samples[i] = (int16_t)((int)(i * 1511) - 24000);
+		sys_put_le16((uint16_t)mono_samples[i], &mono_payload[i * sizeof(int16_t)]);
+	}
+
+	zassert_equal(audio_test_write_wav(AUDIO_TEST_PATH("rt_mono.wav"), &spec), 0,
+		      "could not write the mono master");
+
+	/* Nothing outside the binding says 44.1 kHz or mono: the source proves
+	 * it by not being refused, and the sink writes whatever the pipeline
+	 * carries. A writer still resolving 48 kHz / 2 channels would produce a
+	 * header contradicting its own payload here.
+	 */
+	run_to_eof(&rt_mono_pipeline, &rt_mono_writer, &rt_mono_format);
+
+	out_len = audio_test_read_file(AUDIO_TEST_PATH("rt_mono_out.wav"), out_buf,
+				       sizeof(out_buf));
+	zassert_equal(out_len, RT_MONO_FILE_BYTES, "output is %zu bytes, expected %u", out_len,
+		      (unsigned int)RT_MONO_FILE_BYTES);
+
+	zassert_equal(audio_wav_read_header(out_buf, out_len, &wav), 0,
+		      "the sink produced a header the parser rejects");
+	zassert_equal(wav.sample_rate_hz, 44100U, "the header declares %u Hz, not the bound 44100",
+		      wav.sample_rate_hz);
+	zassert_equal(wav.channels, 1U, "the header declares %u channels, not the bound 1",
+		      wav.channels);
+	zassert_equal(wav.bits_per_sample, 16U, "v1 writes 16 bit PCM");
+	zassert_equal(wav.block_align, 2U, "a mono 16 bit frame is 2 bytes");
+	zassert_equal(wav.data_size, RT_MONO_PAYLOAD_BYTES, "payload length changed");
+
+	/* And the samples themselves survived unchanged. */
+	for (i = 0; i < ARRAY_SIZE(mono_samples); i++) {
+		uint16_t got = sys_get_le16(&out_buf[AUDIO_WAV_MIN_HEADER_SIZE +
+						     i * sizeof(int16_t)]);
+
+		zassert_equal(got, (uint16_t)mono_samples[i],
+			      "sample %zu came back as 0x%04x instead of 0x%04x", i, got,
+			      (uint16_t)mono_samples[i]);
 	}
 }
 

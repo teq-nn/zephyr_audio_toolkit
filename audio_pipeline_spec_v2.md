@@ -24,7 +24,9 @@ The subsystem provides a **lightweight audio pipeline** that chains audio data a
 ### 1.3 Non-goals (v1)
 
 - No generic support for float processing (extensibility only).
-- No dynamic runtime reconfiguration of the pipeline (format & structure are static in v1).
+- No dynamic runtime reconfiguration of the pipeline *while it runs*. Structure is static in v1;
+  the format is fixed for the duration of a run and may be rebound between runs, while the node
+  chain is closed (§5.2).
 - No multi-input or multi-output nodes (no mixer/splitter in v1).
 
 ---
@@ -61,11 +63,11 @@ Sequence (simplified):
 
 ```text
 Pipeline thread:
-    while (playing) {
+    while (state == PLAYING) {
         frame = pull_frame_from_sink();
         if (frame_size == 0) {
             signal EOF;
-            playing = false;
+            state = OPEN;          /* §8.2: stop pulling, keep the chain */
         }
     }
 ```
@@ -84,15 +86,16 @@ sink -> filter -> filter -> source
 
 - The pipeline creates a **worker thread** via `k_thread_create` in `audio_pipeline_start()`.
 - This thread:
-  - loops frame processing while an internal `playing` flag is set,
+  - loops frame processing while the pipeline is in the `PLAYING` state (§8.2),
   - then idles/waits (thread stays alive),
-  - is only terminated by `audio_pipeline_stop()`/`audio_pipeline_join()`.
+  - is only terminated by `audio_pipeline_join()`. `audio_pipeline_stop()` halts the pulling and
+    leaves the thread alive, as §8.2, §9.1 and manifest §7 all require.
 
 ### 3.2 Timing model (v1)
 
 - In v1 there is **no explicit timer pacing** inside the pipeline.
 - The pipeline thread processes frames **as fast as possible** while:
-  - `playing == true`, and
+  - the pipeline is in the `PLAYING` state (§8.2), and
   - nodes still provide data.
 - Real-time sync (e.g., I2S output) is sink responsibility:
   - A hardware sink may block in `process()` or pace itself internally.
@@ -109,6 +112,13 @@ sink -> filter -> filter -> source
   - Nodes are **not reentrant** and need no internal thread safety.
 - **Event queue**  
   - May be read by the application from any thread (Zephyr-style `k_msgq` semantics).
+- **Pipeline format**  
+  - Written only by `audio_pipeline_set_format()`, i.e. from the control thread, and only while the
+    node chain is closed (§5.2, §8.1).
+  - Read by a node in its `open()`, which the control thread also drives, inside
+    `audio_pipeline_start()`. The worker thread never reads it.
+  - Both accesses are therefore already serialised by this rule, which is why the bound format needs
+    no mutex. A future revision that relaxes control-thread exclusivity would have to add one.
 
 ---
 
@@ -141,8 +151,23 @@ struct audio_node {
     const struct audio_node_ops *ops;
     struct audio_node *upstream; /* NULL for sources */
     void *state;                 /* implementation-specific state */
+
+    /* Pipeline format, installed by the pipeline before open() (§5.2).
+     * Owned by the pipeline; NULL until the node is opened. */
+    const struct audio_stream_config *pipeline_format;
 };
 ```
+
+**The format reaches nodes through the node object, not through `open()`.**
+`open()`, `process()` and `close()` keep the signatures above. The pipeline writes
+`pipeline_format` on every node in the chain immediately before it calls that node's
+`open()`, so a node reads its pipeline's format as `node->pipeline_format` and needs no
+route back to the pipeline object. The field is read-only to the node and stable for as
+long as the node is open (§5.2).
+
+Adding a parameter to `open()` was rejected: the format is a property of the node's
+binding, not of the act of opening, and threading it through the op signature would churn
+every node and every fake for a value most nodes ignore.
 
 **Naming convention:**  
 The function pointers in `audio_node_ops` are named **`open`**, **`process`**, **`close`** (“opc”), as requested.
@@ -224,18 +249,17 @@ Note:
 - Enum value: `AUDIO_SAMPLE_FORMAT_S32_LE`
 - All nodes work internally with 32-bit samples.
 
-### 5.2 Valid bits per sample
+### 5.2 The pipeline format
 
 ```c
-struct audio_format {
-    uint32_t sample_rate;           /* Hz, e.g. 44100, 48000 */
-    uint8_t  channels;              /* v1: always 2 */
+struct audio_stream_config {
+    uint32_t sample_rate_hz;        /* Hz, e.g. 44100, 48000 */
+    uint8_t  channels;              /* v1: 1 or 2 */
     uint8_t  valid_bits_per_sample; /* e.g. 16, 24, 32 */
     enum audio_sample_format format;/* internal: AUDIO_SAMPLE_FORMAT_S32_LE */
 };
 ```
 
-- In v1 `channels` is fixed to **2** (stereo).  
 - Samples are **interleaved** in the buffer:
 
 ```text
@@ -245,7 +269,51 @@ buf: L0, R0, L1, R1, L2, R2, ...
 - `valid_bits_per_sample` describes the effective resolution:
   - e.g., `16` for data converted from 16-bit PCM,
   - `24` or `32` for higher resolution.
-- Sample rate and channel count are pipeline-wide settings defined once with the pipeline format.
+
+#### Binding: one format, declared top-down
+
+Sample rate and channel count are **pipeline-wide** and are declared by the application
+before the chain opens. The pipeline is the single authority; nodes do not negotiate with
+each other and no node infers the format from its peers.
+
+- The format is bound with `audio_pipeline_set_format()` (§8.1) and lives in storage the
+  **pipeline owns**. There is no format field on `audio_pipeline_config`: one setter is
+  the only way in, so there is never a second place to look.
+- `audio_pipeline_start()` refuses a pipeline with no bound format (`-ENODATA`) rather
+  than inventing a default.
+- Immediately before it calls a node's `open()`, the pipeline installs the bound format on
+  that node as `audio_node.pipeline_format` (§4.1).
+
+#### Matching: nodes validate, they do not adapt
+
+Every node checks the bound format in `open()` against what it can actually deliver or
+accept, and **fails the open** when it cannot comply. v1 has no resampler and no channel
+mapper (§1.3, §13), so a node can only match or refuse.
+
+- **`sample_rate_hz` and `channels` must match exactly.** A source whose real, on-disk
+  format disagrees with the bound format returns `-ENOTSUP` from `open()`; so does a sink
+  that cannot emit the bound format. Because every node is checked against the same bound
+  format, source and sink agree transitively — the pipeline performs no separate
+  source-versus-sink comparison.
+- **`valid_bits_per_sample` is enforced per node**, not by a pipeline-wide equality check.
+  It describes the resolution carried inside the canonical S32_LE container, and which
+  depths a node supports is a property of that node. v1's file reader and file writer both
+  support 16-bit only, so a bound format asking for 24-bit fails loudly at `open()` (§5.3).
+
+This is what makes a mismatch impossible to observe as a silently mislabelled file: a
+44.1 kHz mono track can only reach a 44.1 kHz mono sink, because both were checked against
+the same bound format before either produced a sample.
+
+#### Reconfiguration
+
+The bound format may be replaced between runs, but **only while the node chain is closed** —
+before the first `audio_pipeline_start()`, or after `audio_pipeline_join()`. Nodes read the
+format in `open()` and keep using it for as long as they are open, so changing it underneath
+an open chain would leave nodes holding a stale format. `set_format()` returns `-EBUSY`
+otherwise (§8.1).
+
+This lifts the v1 restriction that the format is static for the entire runtime: it is static
+for the duration of a run, and rebindable between runs.
 
 ### 5.3 Format conversion
 
@@ -272,7 +340,10 @@ struct audio_pipeline {
     struct audio_node **filters;
     size_t filter_count;
 
-    struct audio_format format;
+    /* Bound format, owned by the pipeline and installed on every node before
+     * open() (§5.2). Written only by audio_pipeline_set_format(). */
+    struct audio_stream_config format;
+    bool format_bound;
 
     struct k_thread thread;
     k_thread_stack_t *stack;
@@ -290,9 +361,18 @@ struct audio_pipeline {
     struct audio_pipeline_event *event_slots;
     size_t event_slot_count;
 
-    bool initialized;
-    bool running;
-    bool playing;
+    /* The one lifecycle state (§8.2), an enum audio_pipeline_state. Whether
+     * the instance is initialised, whether the node chain is open, whether a
+     * worker thread exists and whether it is pulling are all functions of it,
+     * so no two of them can disagree. atomic_t because the worker thread
+     * writes it too; a volatile bool is neither a barrier nor a Zephyr
+     * cross-thread primitive. */
+    atomic_t state;
+
+    /* Worker thread exit request, deliberately not a state value: it applies
+     * to every state that holds a thread, so folding it in would double the
+     * state space (§8.2). */
+    atomic_t quit_request;
 };
 ```
 
@@ -321,16 +401,41 @@ Because there is only one of each, they are **claimed**, not shared:
 Two pipelines that must run concurrently therefore need `AUDIO_PIPELINE_DEFINE()` (or caller-owned
 storage) for at least one of them; that path allocates per instance and never touches the built-ins.
 
-Two obligations fall on the caller, because the guard covers the entry points that *take* the
-resources, not every use of them:
+The window between a `join()` and the next successful `init()`/`start()` — the instance still
+points at the built-ins but owns none of them — is where the read path needs its own rule, because
+`audio_pipeline_get_event()` is reachable at any time and from any thread while
+`audio_pipeline_process_frame()` and the publish path are not:
+
+- The event slots carry a **claim epoch**, bumped whenever they change hands. An instance records
+  the epoch it was given when it claimed them, and `audio_pipeline_get_event()` refuses with
+  `-EPERM` once the two differ. Ownership alone would be the wrong test: releasing the slots does
+  not invalidate the binding, and the events already queued — including the ERROR event `join()`
+  publishes for a failing `close()` — stay readable until another instance claims them. It is that
+  claim which calls `k_msgq_init()` on the same ring and resets head, tail and `used_msgs` behind
+  the previous control block's back.
+- `audio_pipeline_start()` therefore **rebinds** the queue when the epoch moved on while the
+  instance was joined, rather than assuming the binding `init()` made is still good. A restarted
+  instance starts from an empty queue instead of inheriting the intervening owner's leftovers.
+- An instance with its own event slots (`AUDIO_PIPELINE_DEFINE()`) is never affected; nothing else
+  can reach that storage.
+
+Two obligations remain with the caller, because the guard covers the entry points that *take* the
+resources plus the event read, not every use of them:
 
 - An instance running on the built-ins must be joined before it is discarded. `join()` is the only
   release; there is no deinit, and an instance that is initialised and then abandoned holds them
-  for the lifetime of the process.
-- Between a `join()` and the next successful `init()`/`start()` the instance still points at the
-  built-ins but owns none of them. `audio_pipeline_process_frame()` and
-  `audio_pipeline_get_event()` must not be called in that window — they would read and write the
-  new owner's frame buffer and event ring.
+  for the lifetime of the process, locking every later hand-rolled instance out with `-EBUSY`.
+  Accepted rather than fixed: reclaiming from an abandoned instance would mean dereferencing an
+  owner pointer that may name an object that is gone.
+- `audio_pipeline_process_frame()` must not be called between a `join()` and the next successful
+  `init()`/`start()` — it would read and write the new owner's frame buffer. Unlike the event
+  queue, the frame buffer has no reader outside the pipeline's own thread, so the rule stays a
+  contract instead of a check on every frame.
+
+Ownership is by pointer identity, so an instance placed in the storage of a discarded one inherits
+its claim. That is an identity effect, not a corruption path: the inheriting instance re-initialises
+the ring and refreshes the epoch in its own `init()`, and the instance it inherits from no longer
+exists.
 
 ### 6.2 Static definition
 
@@ -398,7 +503,7 @@ int audio_pipeline_set_nodes(struct audio_pipeline *pl,
                              struct audio_node *sink);
 
 int audio_pipeline_set_format(struct audio_pipeline *pl,
-                              const struct audio_format *fmt);
+                              const struct audio_stream_config *fmt);
 ```
 
 Agreements:
@@ -413,8 +518,22 @@ Agreements:
   - assigns `source`, filter list, and `sink`,
   - internally links `upstream` pointers (Filter[i].upstream = (i==0 ? source : Filter[i-1]); sink.upstream = last filter or source).
 - `audio_pipeline_set_format()`:
-  - sets the `audio_format` valid for the whole pipeline.  
-  - v1: format is static for the entire runtime.
+  - copies `fmt` into pipeline-owned storage, where it becomes the one format valid for the whole
+    pipeline (§5.2). The caller's struct is not retained and may be a temporary.
+  - is the **only** way to bind a format. `audio_pipeline_config` carries no format field, so an
+    application cannot declare one statically and then wonder which of the two is live.
+  - must be called after `audio_pipeline_init()` — it writes instance storage that `init()` binds —
+    and returns `-EINVAL` on a pipeline that is not initialised, or on a `fmt` a node could never
+    satisfy (zero `sample_rate_hz`, zero `channels`).
+  - is legal only while the **node chain is closed**: before the first `start()`, or after
+    `join()`. It returns `-EBUSY` while the nodes are open, whether the pipeline is playing or
+    merely idle, because nodes read the format at `open()` and hold it until they are closed.
+  - is subject to §3.3 like every other `audio_pipeline_*` entry point: control thread only. That
+    is what makes a lock unnecessary — the worker thread never reads the bound format, it only
+    walks nodes that were handed it at open time.
+  - is cleared by a subsequent `audio_pipeline_init()`. Re-initialising rebinds the instance to a
+    new configuration and sink, and a format carried over from the previous binding would be a
+    stale default nobody chose; `start()` then reports `-ENODATA` until a format is set again.
 
 ### 8.2 Lifecycle
 
@@ -425,21 +544,77 @@ int audio_pipeline_stop(struct audio_pipeline *pl); /* stops playing */
 int audio_pipeline_join(struct audio_pipeline *pl); /* optional: wait for thread end */
 ```
 
+#### The lifecycle state
+
+The lifecycle is **one state value**, not a set of flags, and the legal moves between its values are
+written down in **one transition table** (`pipeline_transitions[]` in `audio_pipeline_core.c`). A
+move the table does not list is refused rather than stored, so a pipeline cannot be playing without
+a worker thread or hold an open node chain while uninitialised.
+
+| State     | Worker thread | Node chain | Pulling |
+| --------- | ------------- | ---------- | ------- |
+| `UNINIT`  | no            | closed     | no      |
+| `INIT`    | no            | closed     | no      |
+| `OPEN`    | yes           | open       | no      |
+| `PLAYING` | yes           | open       | yes     |
+| `CLOSED`  | yes           | closed     | no      |
+
+```
+                init()                start()               play()
+    UNINIT ------------> INIT ------------------> OPEN <------------- PLAYING
+                          ^                        |    ---stop()-->
+                          |                        |    <--- EOF ----
+              join()      |                        |
+    OPEN / PLAYING / CLOSED                        |
+                          ^                        v node error
+                          +---- join() ------- CLOSED
+                                                   | start() reopens the chain
+                                                   +--> OPEN
+```
+
+`UNINIT` is zero, which is what makes a zero-initialised instance uninitialised by construction.
+
+`CLOSED` is the state a **node error** leaves behind: the worker tears the chain down and parks, but
+it does **not** return (§3.1, §9.2). It is therefore distinct from `INIT`, which has no thread at
+all — `audio_pipeline_is_running()` answers `true` in `CLOSED` and `false` in `INIT`.
+`audio_pipeline_start()` reopens the chain onto the surviving thread, which is what makes recovery
+after an error cheaper than a full restart.
+
+The **worker exit request** is deliberately not a state. "Leave the loop" applies to every state
+that holds a thread, so folding it in would double the state space and reintroduce the unreachable
+combinations the single state removes. Keeping it apart is also what lets the worker
+compare-and-swap its own moves — end of stream, node error — without ever overwriting a pending
+`audio_pipeline_join()`.
+
+Every state move is a **compare-and-swap**, because the worker thread and the control thread both
+make them. When `audio_pipeline_stop()` and the worker's end-of-stream move land together, the
+loser re-reads and looks its move up again against the state that won, instead of silently undoing
+it.
+
 Recommended behavior:
 
 - `audio_pipeline_start()`:
+  - refuses a pipeline with **no bound format** (§5.2) with `-ENODATA`, before it claims anything
+    or creates a thread. The code is distinct from the `-EINVAL` of a malformed configuration so
+    that "you never called `set_format()`" is not confused with "your configuration is wrong",
   - reclaims the built-in resources the instance runs on (§6.1), failing with `-EBUSY` and without
     an ERROR event if another instance took them after a join,
   - creates the thread (if not already existing),
-  - opens all nodes via `node->ops->open`.
+  - installs the bound format on each node (§4.1) and opens all nodes via `node->ops->open`. A node
+    that cannot accept the format fails its open, which fails `start()` (§5.2).
 - `audio_pipeline_play()`:
-  - sets `pl->playing = true`,
-  - pipeline thread begins pulling frames.
+  - moves `OPEN` -> `PLAYING`, and the pipeline thread begins pulling frames,
+  - returns `-EPERM` from any state with no open chain under a live worker, i.e. from `INIT` and
+    from the `CLOSED` a node error leaves behind.
 - `audio_pipeline_stop()`:
-  - sets `pl->playing = false`,
-  - thread stays alive but idles/waits.
+  - moves `PLAYING` -> `OPEN`,
+  - thread stays alive but idles/waits,
+  - is legal in every initialised state, so it returns 0 on a pipeline that was not playing.
 - `audio_pipeline_join()`:
-  - optional: ends thread (cleanup scenarios),
+  - optional: ends thread (cleanup scenarios) and returns the instance to `INIT`, so a joined
+    pipeline can be started again,
+  - closes the node chain only if the state still says it is open: after a node error the worker
+    closed it already, and closing twice would call `close()` on every node a second time,
   - releases any built-in resource the instance holds (§6.1), after the closing errors have been
     published, so the next hand-rolled pipeline can claim it.
 
@@ -470,6 +645,11 @@ Behavior:
 
 - EOF: As soon as a sink receives `out_size == 0`, an `AUDIO_PIPELINE_EVENT_EOF` is generated.
 - ERROR: If any node returns < 0 from `process()` or `open()`/`close()`, the pipeline generates `AUDIO_PIPELINE_EVENT_ERROR` and sets `evt.error` accordingly.
+- After `audio_pipeline_join()`: an instance with its own event slots reads on unchanged, and one
+  running on the built-in slots keeps delivering what is already queued until another instance
+  claims those slots. From that point `audio_pipeline_get_event()` returns `-EPERM` and touches the
+  storage no further (§6.1); a later `audio_pipeline_start()` rebinds the queue and the instance
+  reads on from empty. `-EINVAL` still covers a NULL argument and an uninitialised instance.
 
 ---
 
@@ -481,17 +661,21 @@ Behavior:
 - Filters propagate this state unchanged.
 - Sink detects EOF and informs the pipeline.
 - Pipeline:
-  - sets `playing = false`,
-  - generates `AUDIO_PIPELINE_EVENT_EOF`.
+  - moves `PLAYING` -> `OPEN` (§8.2): the pulling stops, the node chain stays open so the next
+    `audio_pipeline_play()` can run another track, and the worker thread stays alive,
+  - generates `AUDIO_PIPELINE_EVENT_EOF`, *after* the state move, so an observed EOF means the
+    transition has already happened.
 
 ### 9.2 Errors
 
 - Any negative return value from `open()`, `process()`, `close()` is an error.
 - `-EPIPE` is **reserved** for end of stream: `audio_pipeline_process_frame()` returns it when the sink reports `out_size == 0`, and the worker thread turns that into a clean EOF event. No node may report `-EPIPE` as a failure. `audio_node_pull()` (§4.1.1) enforces this on the upstream boundary; a node that talks to a filesystem remaps its own `-EPIPE` to `-EIO` the same way.
 - On the first error:
-  - pipeline stops further frame processing (`playing = false`),
-  - generates `AUDIO_PIPELINE_EVENT_ERROR`,
-  - optionally invokes `close()` on all nodes.
+  - pipeline stops further frame processing and closes the node chain, moving to the `CLOSED` state
+    (§8.2) - the worker thread survives, so `audio_pipeline_is_running()` still answers `true` and
+    `audio_pipeline_start()` can reopen the chain onto it,
+  - generates `AUDIO_PIPELINE_EVENT_ERROR`, *after* the chain is quiesced, so the pipeline is fully
+    stopped by the time the event is observed.
 
 ---
 
@@ -522,7 +706,12 @@ struct audio_file_reader_state {
 - `open()`:
   - open file,
   - parse header,
-  - set `fmt`,
+  - set `fmt` from the parsed header — this is the file's **real** format, and it is what
+    the node validates against `node->pipeline_format` (§4.1),
+  - **reject a file that disagrees with the bound format** (§5.2): a `sample_rate_hz` or
+    `channels` other than the pipeline's returns `-ENOTSUP` and the file is closed again.
+    v1 has no resampler, so the reader cannot convert a 44.1 kHz file for a 48 kHz
+    pipeline — it can only refuse it,
   - `bytes_read = 0`, `eof = false`.
 - `process()`:
   - reads `capacity` * 2 (channels) * 2 (bytes per sample) from file,
@@ -550,10 +739,17 @@ Implementation mirrors the reader, in reverse. Two decisions are contract:
   only bytes the filesystem confirmed, so it can never exceed the payload on disk.
   An aborted run therefore leaves a structurally valid header declaring an empty
   track: a reader sees immediate EOF, never a bogus length.
-- **`audio_file_writer_state.fmt` is the sink-side format seam.** The node has no
-  route to the pipeline config, so the output format lives on the per-instance
-  state. Zero fields take defaults in `open()` (48000 Hz, 2 channels, 16 bit) and
-  the resolved values are written back, so the effective format stays observable.
+- **The output format comes from the pipeline, not from the node.** `open()` reads
+  `node->pipeline_format` (§4.1) and writes exactly that into the WAV header, so the
+  header can never describe a stream different from the one the pipeline carries. The
+  node resolves **no defaults**: there is no 48 kHz/2-channel fallback, because a format
+  is always bound before `start()` runs (§5.2) and a sink guessing one would be the very
+  mislabelling this seam exists to prevent. `audio_file_writer_state.fmt` keeps the
+  resolved format observable after `open()`, but it is now a copy of the pipeline's
+  format rather than an independent source of truth.
+- **The writer refuses what it cannot emit.** v1 writes 16-bit PCM into at most two
+  channels, so `open()` returns `-ENOTSUP` for a bound format with
+  `valid_bits_per_sample != 16` or `channels > 2` (§5.2), before it creates the file.
 
 Conversion is **truncation toward negative infinity** — keep the top 16 bits,
 `(uint16_t)((uint32_t)sample >> 16)`. No rounding bias and no clipping: a 32-bit

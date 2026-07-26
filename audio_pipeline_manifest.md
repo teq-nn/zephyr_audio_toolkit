@@ -66,6 +66,19 @@ It acts as the binding engineering contract for ongoing development.
 - All sources convert inbound formats (e.g., WAV 16-bit) → 32-bit.  
 - All sinks convert back if needed.
 
+### One format, owned by the pipeline:
+- Sample rate and channel count are **pipeline-wide**. They are bound once by the application
+  through `audio_pipeline_set_format()` and stored in the pipeline, which is their single owner —
+  no node and no configuration struct carries a second copy to disagree with.
+- The pipeline installs the bound format on every node before it opens that node. A node
+  **validates and refuses**; it never adapts and never negotiates with its peers. v1 has no
+  resampler, so a source or sink that cannot deliver the bound sample rate or channel count fails
+  its `open()` and the whole start fails with it.
+- A mismatched chain therefore stops before the first sample moves, instead of producing a file
+  whose header describes a stream it does not contain.
+- The format is fixed while a run is in progress and may be rebound between runs, only while the
+  node chain is closed.
+
 ---
 
 ## 5. Frame Size & Timing
@@ -121,6 +134,11 @@ It acts as the binding engineering contract for ongoing development.
   subsystem's single built-in set for a zero-initialised instance. The built-in set follows the
   claim/release rule of §6, so two instances can never publish into one ring: the second one is
   refused at `init()`/`start()` rather than interleaving its events with the first one's.
+- The same rule governs *reading* a released ring. After `join()` an instance keeps delivering the
+  events already queued — nothing else has written to them yet — but once the built-in slots are
+  claimed by someone else, `audio_pipeline_get_event()` reports `-EPERM` instead of consuming the
+  new owner's events, and a restart rebinds the queue rather than reusing a binding that has gone
+  stale.
 - Resolved delivery contract: the callback is invoked **before** the event is queued, so an
   event becoming visible on the queue means the pipeline has finished reacting to it — chain
   quiesced and callback returned. Depth is `CONFIG_AUDIO_PIPELINE_EVENT_QUEUE_DEPTH`; on
