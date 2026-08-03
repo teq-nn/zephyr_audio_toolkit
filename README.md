@@ -41,17 +41,26 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
   null sink, tone analyzer, tone generator).
 - `samples/audio/pipeline_basic/` – reference application (`CMakeLists.txt`, `Kconfig`, `src/main.c`).
 - `samples/audio/ak4619_loopback/` – the AKM AK4619 codec on the `nucleo_h723zg` target, and the
-  only place a codec driver exists in this tree. `drivers/ak4619.{c,h}` is a real Zephyr
+  only place a codec driver exists in this tree. It plays a two-tone stimulus out through the
+  codec's DAC, captures it back through the codec's ADC over a physical cable, and prints a
+  verdict; `README.md` beside it is the bench procedure, including the cable-out control run
+  that is what makes a passing run mean anything. `drivers/ak4619.{c,h}` is a real Zephyr
   `audio_codec` driver (`DEVICE_DT_INST_DEFINE`, `<zephyr/audio/codec.h>`) that ships with the
   sample rather than with the toolkit, so nothing under `include/zephyr/audio/` or `subsys/audio/`
   gains a codec dependency and no `AUDIO_PIPELINE_*` symbol mentions it; `drivers/Kconfig` carries
-  its own `AK4619_*` symbols. `src/main.c` reports on the console whether the part is really
-  answering. Its `boards/nucleo_h723zg.overlay` includes the canonical overlay.
+  its own `AK4619_*` symbols and `Kconfig.loopback` the application's own. `src/loopback_format.h`
+  is the single description of the wire format, of where the captured sample sits in its slot and
+  of the level the loop should return; `src/loopback_verdict.{h,c}` is the oracle that turns one
+  analyzer window into PASS or FAIL, kept separate from `src/main.c` because it is the half that
+  runs on a host. Its `boards/nucleo_h723zg.overlay` includes the canonical overlay.
 - `tests/samples/audio/ak4619_loopback/` – the codec driver on `native_sim`, against an emulated
   AK4619 (`src/ak4619_emul.c`) that models the register file and addressing rules of the datasheet
   and can be told to misbehave. It covers the reset, the register access and the write/read/verify
   link check, including the cases where the bus ACKs and nothing latches, and where the part is
-  absent altogether. No hardware and no I2C peripheral.
+  absent altogether. `src/test_loopback_verdict.c` covers the other half of the sample that needs
+  no hardware: the decibel arithmetic, the pass window, and the placement of the ADC's 24-bit word
+  in its 32-bit slot — a mistake there is 48 dB and is invisible on a console. No hardware and no
+  I2C peripheral.
 - `tests/subsys/audio/pipeline/` – Ztest suites (`test_roundtrip.c`, `test_error_paths.c`); enables
   every shipped node.
 - `tests/subsys/audio/no_file_nodes/` – the other end of the node selection range: only the gain
@@ -100,8 +109,8 @@ nothing else:
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_READER` | `AUDIO_FILE_READER_NODE_DEFINE()` | selects `FILE_SYSTEM` |
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER` | `AUDIO_FILE_WRITER_NODE_DEFINE()` | selects `FILE_SYSTEM` |
 | `CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER` | `AUDIO_GAIN_FILTER_NODE_DEFINE()` | |
-| `CONFIG_AUDIO_PIPELINE_NODE_I2S_IN` | `AUDIO_I2S_IN_NODE_DEFINE()` | selects `I2S`; device from devicetree, slave only; a live source never reports EOF |
-| `CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT` | `AUDIO_I2S_OUT_NODE_DEFINE()` | selects `I2S`; device and clock role come from devicetree, slave only |
+| `CONFIG_AUDIO_PIPELINE_NODE_I2S_IN` | `AUDIO_I2S_IN_NODE_DEFINE()` | selects `I2S`; device from devicetree, clock target only; a live source never reports EOF |
+| `CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT` | `AUDIO_I2S_OUT_NODE_DEFINE()`, `AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE()` | selects `I2S`; device from devicetree; the macro picks the clock role — target by default, controller where the codec has no clock output |
 | `CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK` | `AUDIO_NULL_SINK_NODE_DEFINE()` | |
 | `CONFIG_AUDIO_PIPELINE_NODE_TONE_ANALYZER` | `AUDIO_TONE_ANALYZER_NODE_DEFINE()` | one expected tone per channel; verdict read with `audio_tone_analyzer_get_result()` |
 | `CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN` | `AUDIO_TONE_GEN_NODE_DEFINE()` | one tone per channel |
@@ -131,7 +140,9 @@ west twister -T tests -p nucleo_h723zg
 # ...and run it on an attached board
 west twister -T tests -p nucleo_h723zg --device-testing --hardware-map map.yaml
 
-# The AK4619 codec bring-up image, and what CI builds for the hardware target
+# The AK4619 analog loopback image, and what CI builds for the hardware target.
+# samples/audio/ak4619_loopback/README.md is the bench procedure - it has to be
+# run twice, once with the loop cable in and once with it out.
 west build -b nucleo_h723zg -d build/ak4619 samples/audio/ak4619_loopback \
     -- -DZEPHYR_EXTRA_MODULES=$PWD
 west flash -d build/ak4619

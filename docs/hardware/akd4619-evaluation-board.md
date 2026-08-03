@@ -34,6 +34,8 @@ disagrees with this document, the board wins; record the disagreement here.
 | DAC out → ADC in loop | `J210` → `J201` (+ `J202` for a stereo loop) | manual p.4, p.66 |
 | Attenuation in the loop cable | none needed; the codec supplies it — §4.5 | datasheet pp.11–12 |
 | **Loop gain pair** | **DAC digital volume −6.0 dB, MIC Gain AMP 0 dB** | §4.5 (#46) |
+| Wire format | 48 kHz, 2 ch, I2S, **32-bit slots** (16-bit selectable), MCLK 256 fs | §2, §4.5 (#47) |
+| Expected return level | **−12.0 dBFS RMS ± 4.0 dB** per channel | §4.5 (#47) |
 | Board power | +5.0 V into `J703` (REG); all rail jumpers at their defaults | manual pp.6–8, p.37 |
 
 ## 1. Control mode
@@ -185,12 +187,30 @@ Consequences for the rest of the batch:
   the STM32 blocks started. Here the clocks do not exist until `i2s2` starts, so
   the order is: `SW500` to H → configure the codec over I2C → start `i2s2` →
   start `i2s3`.
-- Zephyr's STM32 I2S driver emits MCLK at **256 fs** — `bit_clk_freq *= 4` for a
-  32-bit channel length on top of a 64 fs bit clock (`drivers/i2s/i2s_stm32.c`,
-  read at Zephyr `main`). At 48 kHz that is MCLK 12.288 MHz, BICK 3.072 MHz,
-  inside the AK4619's 2.027–24.822 MHz MCLK range (datasheet p.23) and matching
-  its **default** `FS[2:0]` = `000` (MCLK 256 fs, BICK 32–256 fs, 8 kHz ≤ fs ≤
-  48 kHz — datasheet p.31, Table 1). #46 gets the easy case.
+- Zephyr's STM32 I2S driver emits MCLK at **256 fs**, and — corrected by #47 —
+  **at either slot length**. The driver compensates for the peripheral's own
+  master-clock divider: `bit_clk_freq *= channel_length == 16U ? 4U * 2U : 4U`
+  (`drivers/i2s/i2s_stm32.c`, read at `v4.4.1`, the revision pinned in
+  `west.yml`). A 32-bit channel length is a 64 fs bit clock times 4; a 16-bit
+  one is 32 fs times 8. Both land on 256 fs. An earlier revision of this section
+  read only the first branch and concluded that 16-bit words would give 128 fs;
+  that was wrong, and nothing depended on it.
+  At 48 kHz, 256 fs is MCLK 12.288 MHz, inside the AK4619's 2.027–24.822 MHz
+  range (datasheet p.23) and matching its **default** `FS[2:0]` = `000` (MCLK
+  256 fs, BICK 32–256 fs, 8 kHz ≤ fs ≤ 48 kHz — datasheet p.31, Table 1). BICK
+  is 3.072 MHz (64 fs) at a 32-bit slot and 1.536 MHz (32 fs) at a 16-bit one,
+  and both are inside that row. #46 gets the easy case either way.
+- **The slot length is therefore a free choice, and #47 makes it one.** The
+  default is 32-bit, because it is the part's own default and the only slot that
+  carries the ADC's full 24-bit word. `CONFIG_AK4619_LOOPBACK_SLOT_16` selects
+  16-bit instead, and the reason that escape hatch exists is a host problem, not
+  a board one: Zephyr's STM32 I2S driver configures its DMA with a fixed 16-bit
+  transfer width whatever `word_size` says, so a 32-bit word crosses to the
+  peripheral as two halves and the peripheral decides which half is the MSB. If
+  that order is the opposite of the little-endian one the toolkit's wire seam
+  writes, the loop runs at the right rate and carries the right energy and comes
+  back as noise. **Verify on the board**, and record which slot length the
+  passing run used.
 - MCLK, BICK and LRCK must be synchronous with each other (datasheet p.31);
   one STM32 block generating all three satisfies that by construction.
 
@@ -382,6 +402,42 @@ configuration rather than of whatever signal happens to be playing, so an
 oscilloscope on `J210` sees the same −6 dBFS whatever #47 sends, and a change
 to the tone generator cannot silently overdrive the ADC.
 
+**What #47 actually plays, and what it accepts.** A −3.0 dBFS peak tone per
+channel (1 kHz Lch, 3 kHz Rch), which is the ceiling §4.4 sets. Adding the
+−6.0 dB above and converting peak to RMS gives an expected return of
+**−12.0 dBFS RMS**, and the pass window is ±4.0 dB around it: 1.7 dB for the
+worst pairing of the two full-scale tolerances, 0.5 dB for the gain stages' own
+accuracy, 0.1 dB for the series resistors, 0.3 dB for the cable and the
+measurement — 2.6 dB, with 1.4 dB of slack. Both numbers are derived in
+`samples/audio/ak4619_loopback/src/loopback_format.h` from the three Kconfig
+symbols in the table above, so changing a level in Kconfig moves the expectation
+with it.
+
+### 4.6 Loop latency
+
+Not used by any verdict, and recorded because a later sample-exact comparison
+will need somewhere to start. #47's analyzer measures the magnitude of a
+frequency component, which does not depend on where its window starts, so the
+loop's latency never enters the pass/fail decision.
+
+What the application prints is an **upper bound**, on the line `first audio
+… ms after the codec left standby`. It contains, in order:
+
+| Contribution | Deterministic part |
+| --- | --- |
+| `ak4619_power_up()` → converters running | RSTN release plus the part's own start-up |
+| Transmit queue | up to 4 blocks × 128 stereo sample sets = 10.7 ms |
+| DAC group delay, the cable, ADC group delay | datasheet filter delays, µs |
+| Receive queue | up to 4 blocks × 128 stereo sample sets = 10.7 ms |
+| One analyzer window | 960 samples/channel = 20 ms |
+
+So roughly 41 ms of it is buffering the application chose, and anything beyond
+that is the part and the path. **Fill this in from a passing run:**
+
+| Run | Slot length | `first audio … ms` | Date / operator |
+| --- | --- | --- | --- |
+| cable in | _(32 or 16)_ | _(not yet measured)_ | |
+
 ## 5. Power and ground
 
 Powered from its own supply. **Do not attempt to power the AKD4619-A from the
@@ -475,6 +531,29 @@ default and no action needed.
 | `J203`, `J204`, `J211` | 3.5 mm | unused | — |
 | `PORT300`, `PORT301`, `PORT303`, `PORT304` | optical/coax | unused | not this batch's path |
 | `TP601`/`TP602` or `TP126`/`TP128` | test point | **I2C to the Nucleo** | §1.4 |
+
+## 6.1 What #47 discovered, and what it needs from the board
+
+Three things came out of building the loopback application that belong here
+rather than in a commit message.
+
+1. **The 256 fs derivation in §2 was half right.** Corrected in place above. The
+   practical consequence is that the slot length became a choice, and #47 makes
+   it one — see the `CONFIG_AK4619_LOOPBACK_SLOT_16` bullet in §2.
+2. **The toolkit's I2S output node could not drive a clock.** It configured its
+   direction as a clock target unconditionally, and Zephyr's STM32 driver
+   enables the MCLK output only for a direction that is a *controller*. With
+   `i2s2` a target, the board would have had MCLK, BICK and LRCK all absent, and
+   the symptom would have been two pipelines waiting forever on a clock nobody
+   drives. #47 added `AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE()` to the
+   toolkit; a clock role is a property of a wiring, not a codec dependency, so
+   it does not cross the line #42 draws.
+3. **The two things a human must check on the board first.** The connector
+   position of `PC6` (UNRESOLVED-6) and the tip/ring assignment of the 3.5 mm
+   jacks (UNRESOLVED-4). The first decides whether MCLK exists at all — without
+   it the run reports *nothing was captured*. The second decides whether a
+   correct wiring reports itself as a channel swap; #47 reports a swap as a swap
+   precisely so that this can be told apart from a real failure.
 
 ## 7. What #44 has to change in the overlay
 

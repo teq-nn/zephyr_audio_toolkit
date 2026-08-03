@@ -67,9 +67,10 @@ config AUDIO_PIPELINE_NODE_I2S_IN
 	  the application still enables a driver and describes the peripheral in
 	  devicetree, which is also where the node gets its device from.
 
-	  The node is a clock target on every path it has - the codec owns MCLK,
-	  BCK and LRCK on the systems this is built for - and there is
-	  deliberately no option here to make it a controller.
+	  The node is a clock target on every path it has, and has no controller
+	  counterpart: where the host generates the clocks it is the transmit
+	  block that does so - it is the one with the MCLK pin - so the receive
+	  side follows them either way.
 
 	  A live input never ends, so this node reports no end of stream: a read
 	  that fails is an error, never an empty frame (manifest §7).
@@ -88,9 +89,14 @@ config AUDIO_PIPELINE_NODE_I2S_OUT
 	  the application still enables a driver and describes the peripheral in
 	  devicetree, which is also where the node gets its device from.
 
-	  The node is a clock target on every path it has - the codec owns MCLK,
-	  BCK and LRCK on the systems this is built for - and there is
-	  deliberately no option here to make it a controller.
+	  The clock role is chosen at the definition site rather than here:
+	  AUDIO_I2S_OUT_NODE_DEFINE() configures the direction as a clock
+	  target, which is the common case, and
+	  AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE() configures it as the
+	  controller, for a board whose codec has no clock output at all. It is
+	  not a symbol here because it belongs to one wiring rather than to an
+	  image: two boards built from the same image could need opposite
+	  answers, and a Kconfig symbol could only give them one.
 
 	  Defaults to n like every other node symbol here, so the set of nodes
 	  in an image is visible in prj.conf.

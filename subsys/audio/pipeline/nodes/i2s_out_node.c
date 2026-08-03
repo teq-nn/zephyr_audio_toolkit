@@ -25,9 +25,19 @@
  * deadlock behind one. A timeout here would turn a slow consumer into dropped
  * audio, which is the one failure a sink must not invent.
  *
+ * THE CLOCK ROLE IS THE DEFINITION SITE'S
+ * ---------------------------------------
+ * open() configures the direction as a clock target or as the clock controller
+ * according to the macro that defined the node, and that is the whole of the
+ * difference between the two. It is a definition-time choice rather than a
+ * Kconfig symbol because it belongs to one wiring: a board whose codec cannot
+ * generate MCLK, BICK or LRCK needs the host to, and a board whose codec does
+ * needs the host not to. See ::AUDIO_I2S_OUT_TX_CLK_CONTROLLER_OPTIONS.
+ *
  * All state lives in the per-instance ::audio_i2s_out_state allocated by
- * AUDIO_I2S_OUT_NODE_DEFINE(), which allocates the transfer blocks with it, so
- * several sinks can run side by side.
+ * AUDIO_I2S_OUT_NODE_DEFINE() or AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE(),
+ * which allocates the transfer blocks with it, so several sinks can run side by
+ * side.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -64,10 +74,11 @@ LOG_MODULE_REGISTER(audio_i2s_out, LOG_LEVEL_INF);
  * Stop the transmit direction and give every block the driver still holds back
  * to the slab, leaving the node in a well-defined closed state.
  *
- * DROP rather than DRAIN: draining waits for the queue to play out, and this
- * node is a clock target - if the master has stopped, that wait never ends.
- * DROP is also the one trigger legal from every state but NOT_READY, so the
- * same call closes a running stream and one that has underrun.
+ * DROP rather than DRAIN: draining waits for the queue to play out, and where
+ * this node is a clock target - the default role - a master that has stopped
+ * makes that wait endless. DROP is also the one trigger legal from every state
+ * but NOT_READY, so the same call closes a running stream and one that has
+ * underrun, in either clock role.
  */
 static int i2s_out_release(struct audio_i2s_out_state *state)
 {
@@ -277,7 +288,13 @@ static int i2s_out_open(struct audio_node *node)
 	cfg.word_size = wire.word_bits;
 	cfg.channels = fmt->channels;
 	cfg.format = I2S_FMT_DATA_FORMAT_I2S;
-	cfg.options = AUDIO_I2S_OUT_TX_OPTIONS;
+	/* The definition macro chose the role and this is the only place it is
+	 * turned into option bits. Both constants are named rather than written
+	 * out, because the controller one is zero and a bare 0 here would read
+	 * as "no options" instead of as a decision.
+	 */
+	cfg.options = state->clk_controller ? AUDIO_I2S_OUT_TX_CLK_CONTROLLER_OPTIONS
+					   : AUDIO_I2S_OUT_TX_OPTIONS;
 	cfg.frame_clk_freq = fmt->sample_rate_hz;
 	cfg.mem_slab = state->slab;
 	cfg.block_size = state->block_bytes;
@@ -296,8 +313,9 @@ static int i2s_out_open(struct audio_node *node)
 	state->configured = true;
 	state->started = false;
 
-	LOG_INF("%s: %u Hz, %u ch, %u bit, %zu byte blocks", state->dev->name, fmt->sample_rate_hz,
-		fmt->channels, wire.word_bits, state->block_bytes);
+	LOG_INF("%s: %u Hz, %u ch, %u bit, %zu byte blocks, clock %s", state->dev->name,
+		fmt->sample_rate_hz, fmt->channels, wire.word_bits, state->block_bytes,
+		state->clk_controller ? "controller" : "target");
 
 	return 0;
 }

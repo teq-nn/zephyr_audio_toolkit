@@ -11,4 +11,10 @@ target_sources_ifdef(CONFIG_AK4619 app PRIVATE drivers/ak4619.c)
 
 target_include_directories(app PRIVATE drivers)
 
-target_sources(app PRIVATE src/main.c)
+# src/loopback_verdict.c is listed separately from main.c because it is the half
+# of this application that has no hardware in it: the native_sim suite under
+# tests/samples/ compiles the same file and asserts what it decides (issue #47).
+target_sources(app PRIVATE
+	src/main.c
+	src/loopback_verdict.c
+)

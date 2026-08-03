@@ -4,6 +4,10 @@
 # root does - one definition, two consumers.
 rsource "../../../../samples/audio/ak4619_loopback/drivers/Kconfig"
 
+# The same for the application's own choices: the suite compiles src/ of the
+# sample, so it has to see the symbols src/loopback_format.h is written against.
+rsource "../../../../samples/audio/ak4619_loopback/Kconfig.loopback"
+
 # A test application supplies the Kconfig root, so the rest of the tree has to
 # be sourced explicitly.
 source "Kconfig.zephyr"

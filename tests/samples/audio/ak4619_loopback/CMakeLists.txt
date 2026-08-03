@@ -10,8 +10,10 @@ set(AK4619_SAMPLE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../samples/audio/ak46
 
 target_sources(app PRIVATE
 	${AK4619_SAMPLE_DIR}/drivers/ak4619.c
+	${AK4619_SAMPLE_DIR}/src/loopback_verdict.c
 	src/ak4619_emul.c
 	src/test_ak4619.c
+	src/test_loopback_verdict.c
 )
 
 # drivers/ for the driver's own header; src/ of the *sample* for

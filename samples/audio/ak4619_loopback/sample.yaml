@@ -9,13 +9,14 @@
 # platform_allow keeps it off native_sim: the sample resolves the audio-codec
 # alias at build time, and only this board's overlay declares one.
 sample:
-  name: AK4619 codec bring-up
+  name: AK4619 analog loopback
   description: >
-    Reset an AKM AK4619 over I2C, prove on the console that it is answering
-    rather than that the bus ACKed into the void, then program the audio
-    interface, the clock mode and the analog paths and read every one of those
-    registers back - register 0x12 included, which is where an internal
-    loopback would hide.
+    Bring an AKM AK4619 up over I2C, program its audio interface, clocking and
+    analog paths, then play a two-tone stimulus out through its DAC and capture
+    it back through its ADC over a physical cable, and report a verdict: the
+    level and the tone each channel came back with, and PASS or FAIL. The run
+    is only meaningful in pairs - see README.md, which says to repeat it with
+    the loop cable unplugged and keep both consoles.
 tests:
   sample.audio.ak4619_loopback:
     build_only: true

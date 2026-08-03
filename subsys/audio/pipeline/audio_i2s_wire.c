@@ -16,11 +16,16 @@
 
 #include <zephyr/audio/audio_i2s_wire.h>
 
-/* v1 carries 16 bit words; see the header for why wider words wait for
- * hardware.
+/* The two depths this link carries; see the header for why each one exists and
+ * why 24 bit is not among them.
  */
-#define I2S_WIRE_BITS_PER_WORD  16U
-#define I2S_WIRE_BYTES_PER_WORD (I2S_WIRE_BITS_PER_WORD / 8U)
+#define I2S_WIRE_BITS_NARROW 16U
+#define I2S_WIRE_BITS_WIDE   32U
+
+/* How far a container sample is shifted to become a narrow wire word. The wide
+ * word needs no shift at all - the container already is one (spec §5.3).
+ */
+#define I2S_WIRE_NARROW_SHIFT 16U
 
 int audio_i2s_wire_format_get(uint8_t valid_bits_per_sample, struct audio_i2s_wire_format *out)
 {
@@ -28,12 +33,13 @@ int audio_i2s_wire_format_get(uint8_t valid_bits_per_sample, struct audio_i2s_wi
 		return -EINVAL;
 	}
 
-	if (valid_bits_per_sample != I2S_WIRE_BITS_PER_WORD) {
+	if (valid_bits_per_sample != I2S_WIRE_BITS_NARROW &&
+	    valid_bits_per_sample != I2S_WIRE_BITS_WIDE) {
 		return -ENOTSUP;
 	}
 
-	out->word_bits = I2S_WIRE_BITS_PER_WORD;
-	out->word_bytes = I2S_WIRE_BYTES_PER_WORD;
+	out->word_bits = valid_bits_per_sample;
+	out->word_bytes = (uint8_t)(valid_bits_per_sample / 8U);
 
 	return 0;
 }
@@ -68,8 +74,12 @@ int audio_i2s_wire_from_container(uint8_t valid_bits_per_sample, const int32_t *
 		 * half of the container, whatever the host does with signed
 		 * shifts.
 		 */
-		sys_put_le16((uint16_t)((uint32_t)samples[i] >> 16),
-			     &wire[i * I2S_WIRE_BYTES_PER_WORD]);
+		if (fmt.word_bits == I2S_WIRE_BITS_NARROW) {
+			sys_put_le16((uint16_t)((uint32_t)samples[i] >> I2S_WIRE_NARROW_SHIFT),
+				     &wire[i * fmt.word_bytes]);
+		} else {
+			sys_put_le32((uint32_t)samples[i], &wire[i * fmt.word_bytes]);
+		}
 	}
 
 	return 0;
@@ -96,14 +106,19 @@ int audio_i2s_wire_to_container(uint8_t valid_bits_per_sample, const uint8_t *wi
 	}
 
 	for (i = 0; i < count; i++) {
-		int16_t word = (int16_t)sys_get_le16(&wire[i * I2S_WIRE_BYTES_PER_WORD]);
+		if (fmt.word_bits == I2S_WIRE_BITS_NARROW) {
+			int16_t word = (int16_t)sys_get_le16(&wire[i * fmt.word_bytes]);
 
-		/* Shifted as unsigned on purpose: left-shifting a negative
-		 * signed value is not defined by the C standard, while the two's
-		 * complement result below is exactly what spec §5.3 asks for
-		 * (-1 -> 0xffff0000, -32768 -> INT32_MIN).
-		 */
-		samples[i] = (int32_t)((uint32_t)(int32_t)word << 16);
+			/* Shifted as unsigned on purpose: left-shifting a
+			 * negative signed value is not defined by the C
+			 * standard, while the two's complement result below is
+			 * exactly what spec §5.3 asks for (-1 -> 0xffff0000,
+			 * -32768 -> INT32_MIN).
+			 */
+			samples[i] = (int32_t)((uint32_t)(int32_t)word << I2S_WIRE_NARROW_SHIFT);
+		} else {
+			samples[i] = (int32_t)sys_get_le32(&wire[i * fmt.word_bytes]);
+		}
 	}
 
 	return 0;

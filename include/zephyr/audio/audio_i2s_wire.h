@@ -60,11 +60,39 @@ struct audio_i2s_wire_format {
  * bound format by asking here once in @c open() (spec §5.2 - nodes validate,
  * they do not adapt).
  *
- * v1 carries 16 bit words only, like the file nodes at the other end of the
- * pipeline. Wider words are not merely unimplemented arithmetic: on the STM32
- * I2S register file a 24 or 32 bit word is moved as two 16 bit halves in an
- * order the container does not describe, and that order cannot be settled
- * without hardware to verify it against.
+ * Two depths are carried, 16 and 32 bit, and each exists because something at
+ * the other end of a link needs it:
+ *
+ *  - **16 bit** is what the file nodes speak, so a file played out over I2S and
+ *    a capture written back to a file need no conversion beyond this one.
+ *  - **32 bit** is what a codec with a 32 bit slot needs. The AK4619 bring-up
+ *    (samples/audio/ak4619_loopback, issue #47) runs a 32 bit slot so that the
+ *    part's 24 bit ADC word arrives MSB justified inside it, and the slot
+ *    length is what @c i2s_config.word_size sets. At 32 bit the mapping is the
+ *    identity - the canonical container already *is* an MSB aligned 32 bit
+ *    value (spec §5.3) - which is why this depth adds arithmetic that cannot
+ *    round, clip or shift anything.
+ *
+ * 24 bit stays refused. It is the one depth whose word does not fill a whole
+ * number of bytes the same way in every driver, and nothing in this tree needs
+ * it: a part whose converter is 24 bit is carried in a 32 bit slot instead.
+ *
+ * WHAT A 32 BIT WORD ASSUMES ABOUT THE DRIVER, AND WHY IT IS WRITTEN DOWN HERE
+ * ---------------------------------------------------------------------------
+ * A wire word is stored little endian, i.e. in the memory order the CPU itself
+ * would use, and the block is handed to the driver as bytes. That is right for
+ * any driver whose DMA moves words as wide as the word, and for any FIFO that
+ * is byte addressed.
+ *
+ * It is an *assumption* for one case worth naming: Zephyr's STM32 I2S driver
+ * configures its DMA with a fixed 16 bit transfer width whatever
+ * @c i2s_config.word_size says (@c drivers/i2s/i2s_stm32.c, read at v4.4.1), so
+ * a 32 bit word reaches the peripheral as two halves and the peripheral decides
+ * which half is the MSB. If that order is the opposite of this one, a link
+ * still runs at the right rate and still carries energy - what comes back is
+ * the two halves swapped, which reads as broadband noise rather than as
+ * silence. That signature is deliberately distinguishable, and the AK4619
+ * loopback sample reports it as its own diagnosis.
  *
  * @param valid_bits_per_sample Effective resolution carried in the container,
  *                              i.e. @c audio_stream_config.valid_bits_per_sample.
@@ -89,6 +117,11 @@ int audio_i2s_wire_format_get(uint8_t valid_bits_per_sample, struct audio_i2s_wi
  * 16 always lands inside [-32768, 32767], so clamping cannot be needed, and the
  * result is the exact inverse of ::audio_i2s_wire_to_container.
  *
+ * For a 32 bit link the container sample *is* the wire word, stored little
+ * endian. Nothing is discarded, so the round trip is bit identical for every
+ * value the container can hold rather than only for those that survive a
+ * narrowing.
+ *
  * @param valid_bits_per_sample Effective resolution of @p samples.
  * @param samples               Container samples to narrow. Must not be NULL.
  * @param count                 Number of samples in @p samples.
@@ -111,7 +144,8 @@ int audio_i2s_wire_from_container(uint8_t valid_bits_per_sample, const int32_t *
  * The inverse of ::audio_i2s_wire_from_container, and the direction the I2S
  * input source node uses. For a 16 bit link this is the widening spec §5.3
  * prescribes for every source, @c s32 = @c s16 << 16, so a wire word that made
- * a round trip through the pipeline arrives back bit identical.
+ * a round trip through the pipeline arrives back bit identical. For a 32 bit
+ * link the word is the container sample already and is read back little endian.
  *
  * @param valid_bits_per_sample Effective resolution to produce.
  * @param wire                  Block holding the received words. Must not be

@@ -178,7 +178,7 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER` | Build the file writer sink; selects `FILE_SYSTEM`. |
 | `CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER` | Build the gain filter. |
 | `CONFIG_AUDIO_PIPELINE_NODE_I2S_IN` | Build the I2S input source; selects `I2S`. Never reports EOF: a live input has no end. |
-| `CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT` | Build the I2S output sink; selects `I2S`. |
+| `CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT` | Build the I2S output sink; selects `I2S`. The clock role is the definition macro's, not a symbol: `AUDIO_I2S_OUT_NODE_DEFINE()` is a target, `AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE()` drives the clocks. |
 | `CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK` | Build the null sink. |
 | `CONFIG_AUDIO_PIPELINE_NODE_TONE_ANALYZER` | Build the tone analyzer sink. |
 | `CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN` | Build the tone generator source. |

@@ -337,10 +337,16 @@ extern const struct audio_node_ops gain_filter_node_ops;
 /**
  * @brief Clock role the source configures, fixed at target (slave).
  *
- * The same statement ::AUDIO_I2S_OUT_TX_OPTIONS makes for the transmit side,
- * and made again here because the two directions are configured by two
- * independent @c i2s_configure() calls - on this hardware even on two different
- * peripherals - so each one carries its own assertion.
+ * Stated separately from the transmit side because the two directions are
+ * configured by two independent @c i2s_configure() calls - on this hardware
+ * even on two different peripherals - so each one carries its own assertion.
+ *
+ * Unlike the transmit side there is no controller counterpart, because nothing
+ * needs one yet: on a board where the host generates the clocks, one direction
+ * generates them and the other receives them, and the transmit block is the one
+ * that has the MCLK pin. Add the counterpart when a board arrives that inverts
+ * that - the change is the sink's @c clk_controller field and its second macro,
+ * mirrored - rather than passing a bare 0 from a definition site.
  *
  * @c I2S_OPT_BIT_CLK_CONTROLLER and @c I2S_OPT_FRAME_CLK_CONTROLLER are zero
  * bits, so "controller" is not a value this node could pass by accident; it is
@@ -454,20 +460,42 @@ extern const struct audio_node_ops i2s_in_node_ops;
 #ifdef CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT
 
 /**
- * @brief Clock role the sink configures, fixed at target (slave).
+ * @brief Clock role the sink configures by default: target (slave).
  *
- * The codec is the clock master for the systems this node is built for; it owns
- * MCLK, BCK and LRCK, and a second device driving any of them is contention on
- * a shared wire. There is deliberately no controller counterpart to this macro
- * and no Kconfig option beside it: @c I2S_OPT_BIT_CLK_CONTROLLER and
- * @c I2S_OPT_FRAME_CLK_CONTROLLER are zero bits, so "controller" is not a value
- * the node could pass by accident - it is the absence of the two below, and
- * they are always present.
- *
- * Named here rather than left inside the node body so that a board suite can
- * assert the clock role at build time.
+ * A codec that owns MCLK, BCK and LRCK is the common case, and it is the only
+ * one AUDIO_I2S_OUT_NODE_DEFINE() produces - a second device driving any of
+ * those wires is contention on a strap. Named here rather than left inside the
+ * node body so that a board suite can assert the clock role at build time.
  */
 #define AUDIO_I2S_OUT_TX_OPTIONS (I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT_CLK_TARGET)
+
+/**
+ * @brief Clock role AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE() configures.
+ *
+ * The other case, and it is a property of the *board*, not of the codec: some
+ * parts have no clock output at all. The AK4619 is one - its MCLK, BICK and
+ * LRCK are input pins and it has no PLL (datasheet p.7) - so on the AKD4619
+ * evaluation board the STM32 has to generate all three or nothing is clocked
+ * (docs/hardware/akd4619-evaluation-board.md §2). A node that can only be a
+ * target cannot be used on such a board at all: the STM32 I2S driver enables
+ * its MCLK output only for a direction that is a controller
+ * (@c drivers/i2s/i2s_stm32.c), so a target-configured transmitter emits no
+ * clock, both blocks then wait on a clock nobody drives, and the symptom is a
+ * pipeline that appears to hang.
+ *
+ * @c I2S_OPT_BIT_CLK_CONTROLLER and @c I2S_OPT_FRAME_CLK_CONTROLLER are zero
+ * bits, so "controller" is the *absence* of the target bits rather than a value
+ * a node could pass by accident. Spelling it as a named constant is what lets a
+ * definition site and a board suite say which role was chosen instead of
+ * passing a bare 0 around - and what keeps the choice a definition-time
+ * decision rather than a Kconfig symbol, since it belongs to one wiring and not
+ * to an image.
+ *
+ * This is a clock role and nothing else. The node still knows no codec, no
+ * register map and no vendor, which is the boundary issue #42 draws.
+ */
+#define AUDIO_I2S_OUT_TX_CLK_CONTROLLER_OPTIONS                                                    \
+	(I2S_OPT_FRAME_CLK_CONTROLLER | I2S_OPT_BIT_CLK_CONTROLLER)
 
 /** @brief Per-instance state of the I2S output sink node. */
 struct audio_i2s_out_state {
@@ -480,6 +508,18 @@ struct audio_i2s_out_state {
 	struct k_mem_slab *slab;
 	/** Bytes in one @ref slab block, owned by the definition macro. */
 	size_t block_bytes;
+	/**
+	 * True when open() must configure this direction as the clock
+	 * controller (::AUDIO_I2S_OUT_TX_CLK_CONTROLLER_OPTIONS) rather than as
+	 * a target (::AUDIO_I2S_OUT_TX_OPTIONS). Owned by the definition macro.
+	 *
+	 * A @c bool rather than the option bits themselves, and false rather
+	 * than true, so that zero keeps its historical meaning: a state left
+	 * unset by anything that is not one of the two macros still configures
+	 * the target role the sink has always configured, and the controller
+	 * role can only be reached by asking for it by name.
+	 */
+	bool clk_controller;
 
 	/*
 	 * Everything below belongs to the node implementation. It is only
@@ -510,6 +550,12 @@ extern const struct audio_node_ops i2s_out_node_ops;
  * time, so a chain wired to a peripheral the board does not have fails to build
  * instead of failing to start.
  *
+ * This one configures the direction as a clock **target**
+ * (::AUDIO_I2S_OUT_TX_OPTIONS). Where the board needs the peripheral to
+ * generate the clocks instead, use
+ * AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE() - same node, same parameters, the
+ * other role.
+ *
  * @param _name          Symbol name of the @ref audio_node instance.
  * @param _upstream      Pointer to the upstream node.
  * @param _node_id       Devicetree node identifier of the I2S device, e.g.
@@ -524,22 +570,50 @@ extern const struct audio_node_ops i2s_out_node_ops;
  *                       late producer at the cost of latency.
  */
 #define AUDIO_I2S_OUT_NODE_DEFINE(_name, _upstream, _node_id, _frame_samples, _blocks)             \
+	Z_AUDIO_I2S_OUT_NODE_DEFINE(_name, _upstream, _node_id, _frame_samples, _blocks, false,    \
+				    "AUDIO_I2S_OUT_NODE_DEFINE")
+
+/**
+ * @brief Statically define an I2S output sink node that drives the clocks.
+ *
+ * Identical to AUDIO_I2S_OUT_NODE_DEFINE() in every respect except the clock
+ * role: @c open() configures this direction with
+ * ::AUDIO_I2S_OUT_TX_CLK_CONTROLLER_OPTIONS, so the peripheral generates BCK
+ * and LRCK - and, where the devicetree node says @c mck-enabled, MCLK.
+ *
+ * Use it when the part on the other end cannot generate them, which is a fact
+ * about the board rather than about this node. Exactly one device may drive a
+ * given BCK/LRCK pair: a second controller on the same strap is two push-pull
+ * outputs fighting, and the strap, not the software, decides who wins.
+ *
+ * The parameters are those of AUDIO_I2S_OUT_NODE_DEFINE().
+ */
+#define AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE(_name, _upstream, _node_id, _frame_samples,       \
+						 _blocks)                                          \
+	Z_AUDIO_I2S_OUT_NODE_DEFINE(_name, _upstream, _node_id, _frame_samples, _blocks, true,     \
+				    "AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE")
+
+/* Shared body of the two definition macros above; not API. @p _macro is the
+ * name the caller used, so a failed assertion names the macro that was written
+ * rather than this one.
+ */
+#define Z_AUDIO_I2S_OUT_NODE_DEFINE(_name, _upstream, _node_id, _frame_samples, _blocks,           \
+				    _controller, _macro)                                           \
 	BUILD_ASSERT(DT_NODE_HAS_STATUS_OKAY(_node_id),                                            \
-		     "AUDIO_I2S_OUT_NODE_DEFINE(" #_name "): " #_node_id                           \
-		     " is not an enabled devicetree node");                                        \
+		     _macro "(" #_name "): " #_node_id " is not an enabled devicetree node");      \
 	BUILD_ASSERT((_frame_samples) >= 2,                                                        \
-		     "AUDIO_I2S_OUT_NODE_DEFINE(" #_name "): frame_samples is the TOTAL "          \
-		     "interleaved sample count and must hold at least one stereo sample "          \
-		     "set (>= 2), like AUDIO_PIPELINE_DEFINE()");                                  \
-	BUILD_ASSERT((_blocks) >= 2,                                                               \
-		     "AUDIO_I2S_OUT_NODE_DEFINE(" #_name "): the I2S API needs at least "          \
-		     "two transfer blocks per queue");                                             \
+		     _macro "(" #_name "): frame_samples is the TOTAL "                            \
+			    "interleaved sample count and must hold at least one stereo sample "   \
+			    "set (>= 2), like AUDIO_PIPELINE_DEFINE()");                           \
+	BUILD_ASSERT((_blocks) >= 2, _macro "(" #_name "): the I2S API needs at least "            \
+					    "two transfer blocks per queue");                      \
 	K_MEM_SLAB_DEFINE_STATIC(_name##_slab, AUDIO_I2S_BLOCK_BYTES(_frame_samples), (_blocks),   \
 				 AUDIO_I2S_BLOCK_ALIGN);                                           \
 	static struct audio_i2s_out_state _name##_state = {                                        \
 		.dev = DEVICE_DT_GET(_node_id),                                                    \
 		.slab = &_name##_slab,                                                             \
 		.block_bytes = AUDIO_I2S_BLOCK_BYTES(_frame_samples),                              \
+		.clk_controller = (_controller),                                                   \
 	};                                                                                         \
 	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SINK, &i2s_out_node_ops, (_upstream),             \
 			  &_name##_state)
@@ -548,6 +622,12 @@ extern const struct audio_node_ops i2s_out_node_ops;
 
 #define AUDIO_I2S_OUT_NODE_DEFINE(_name, _upstream, _node_id, _frame_samples, _blocks)             \
 	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_SINK, "AUDIO_I2S_OUT_NODE_DEFINE",           \
+			       "AUDIO_PIPELINE_NODE_I2S_OUT")
+
+#define AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE(_name, _upstream, _node_id, _frame_samples,       \
+						 _blocks)                                          \
+	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_SINK,                                        \
+			       "AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE",                         \
 			       "AUDIO_PIPELINE_NODE_I2S_OUT")
 
 #endif /* CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT */

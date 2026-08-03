@@ -76,6 +76,20 @@ BUILD_ASSERT(AUDIO_I2S_OUT_TX_OPTIONS == (I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT
 	     "the sink must configure both clocks as targets and nothing else");
 
 /*
+ * The other role, which the AK4619 loopback application uses on this same block
+ * (issue #47). Asserted here beside the first because the two constants are the
+ * whole of the difference between the two definition macros, and because the
+ * controller one being zero is exactly what makes it easy to get wrong: a
+ * "correction" that gave it the target bits would make the sink stop clocking
+ * with no build error and no log line, and both directions would then wait
+ * forever on a clock nobody drives.
+ */
+BUILD_ASSERT(AUDIO_I2S_OUT_TX_CLK_CONTROLLER_OPTIONS == 0,
+	     "the controller role is the absence of the target bits, not a bit of its own");
+BUILD_ASSERT(AUDIO_I2S_OUT_TX_CLK_CONTROLLER_OPTIONS != AUDIO_I2S_OUT_TX_OPTIONS,
+	     "the two clock roles must not resolve to the same option word");
+
+/*
  * Cache maintenance around every transfer acts on whole lines, so a block must
  * be line aligned and line sized (manifest §6). On this part the line is 32.
  */

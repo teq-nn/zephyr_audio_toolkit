@@ -298,7 +298,8 @@ mapper (§1.3, §13), so a node can only match or refuse.
 - **`valid_bits_per_sample` is enforced per node**, not by a pipeline-wide equality check.
   It describes the resolution carried inside the canonical S32_LE container, and which
   depths a node supports is a property of that node. v1's file reader and file writer both
-  support 16-bit only, so a bound format asking for 24-bit fails loudly at `open()` (§5.3).
+  support 16-bit only, so a bound format asking for 24-bit fails loudly at `open()` (§5.3);
+  the I2S nodes carry 16- and 32-bit words (§10.5) and refuse everything else the same way.
 
 This is what makes a mismatch impossible to observe as a silently mislabelled file: a
 44.1 kHz mono track can only reach a 44.1 kHz mono sink, because both were checked against
@@ -872,10 +873,19 @@ contract:
   when the wire seam grows a depth, and the alignment is the cache-line rule of manifest §6
   — DMA-facing blocks must be line aligned *and* line sized, and must live where the
   driver's DMA controller can address them.
-- **Target on both clocks, with no path to controller.** `open()` passes
-  `AUDIO_I2S_OUT_TX_OPTIONS`, i.e. `I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT_CLK_TARGET`, and
-  there is no Kconfig option beside it: the controller constants are zero bits, so
-  "controller" is the *absence* of these two rather than a value the node could pass.
+- **The clock role belongs to the definition site, and target is the default.**
+  `AUDIO_I2S_OUT_NODE_DEFINE()` makes `open()` pass `AUDIO_I2S_OUT_TX_OPTIONS`, i.e.
+  `I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT_CLK_TARGET`;
+  `AUDIO_I2S_OUT_CLK_CONTROLLER_NODE_DEFINE()` — same parameters, same node — makes it pass
+  `AUDIO_I2S_OUT_TX_CLK_CONTROLLER_OPTIONS` instead, so the peripheral generates BCK, LRCK
+  and, where devicetree says `mck-enabled`, MCLK. There is deliberately **no Kconfig symbol**
+  for it: the role is a property of one wiring, not of an image, and a board whose codec has
+  no clock output at all (the AK4619's MCLK, BICK and LRCK are input pins) cannot use a node
+  that can only be a target — the STM32 driver enables its MCLK output only for a direction
+  that is a controller, so a target-configured transmitter emits nothing and both directions
+  then wait on a clock nobody drives. The controller constants are zero bits, which is why
+  both roles are *named* constants rather than a bare `0` passed from a definition site. A
+  clock role is not a codec dependency: the node still knows no register map and no vendor.
 - **Underrun is a state, not an event.** A TX underrun parks the direction in
   `I2S_STATE_ERROR`, where every write is rejected until `I2S_TRIGGER_PREPARE` clears it. A
   failed write is therefore first answered with prepare-and-restart and only reported once
@@ -909,12 +919,23 @@ int audio_i2s_wire_to_container(uint8_t valid_bits_per_sample, const uint8_t *wi
   the driver (`word_bits`, which is `i2s_config.word_size`) and how much room a block needs
   (`word_bytes`) together, and every conversion refuses exactly what it refuses. A node
   validates a bound format by asking here once in `open()` (§5.2).
-- **v1 carries 16-bit words**, matching the file nodes at the other end of the pipeline. The
-  arithmetic is §5.3 verbatim — `s16 = s32 >> 16` out, `s32 = s16 << 16` back — so the two
-  directions are exact inverses and a wire round trip is bit identical. Wider words are not
-  merely unimplemented: on the STM32 I2S register file a 24- or 32-bit word moves as two
-  16-bit halves in an order the container does not describe, which cannot be settled without
-  hardware to verify it.
+- **Two depths: 16-bit and 32-bit.** 16-bit matches the file nodes at the other end of the
+  pipeline, and its arithmetic is §5.3 verbatim — `s16 = s32 >> 16` out, `s32 = s16 << 16`
+  back — so the two directions are exact inverses and a wire round trip is bit identical.
+  32-bit is the identity: the canonical container already *is* an MSB-aligned 32-bit value,
+  so nothing is discarded and the round trip is bit identical for every value rather than
+  only for those that survive a narrowing. It exists because a codec whose converter word is
+  narrower than its slot needs the slot, not the converter, on the wire — the AK4619's ADC
+  emits 24 bits into a 32-bit slot (`samples/audio/ak4619_loopback`, issue #47).
+  **24-bit stays refused**: it is the one depth whose word does not fill a whole number of
+  bytes, and a part with a 24-bit converter is carried in a 32-bit slot instead.
+- **A 32-bit word assumes the driver moves it whole.** Words are stored little endian, i.e.
+  in the CPU's own memory order, which is right for any DMA as wide as the word and for any
+  byte-addressed FIFO. Zephyr's STM32 I2S driver is the case worth naming: it configures its
+  DMA with a fixed 16-bit transfer width whatever `word_size` says, so a 32-bit word reaches
+  the peripheral as two halves and the peripheral decides which half is the MSB. A wrong
+  order there does not silence a link — it swaps the halves, which reads as broadband noise,
+  and the AK4619 loopback sample reports that signature as its own diagnosis.
 - **Allocation free, driver free, endianness explicit**, so it is testable on a host with no
   I2S device at all (`tests/subsys/audio/i2s_wire/`).
 
@@ -926,8 +947,11 @@ int audio_i2s_wire_to_container(uint8_t valid_bits_per_sample, const uint8_t *wi
     §10.5,
   - hands the samples to the chain.
 
-It is the mirror of §10.4 and shares its seam, its block geometry
-(`AUDIO_I2S_BLOCK_ALIGN`, `AUDIO_I2S_BLOCK_BYTES()`) and its clock role.
+It is the mirror of §10.4 and shares its seam and its block geometry
+(`AUDIO_I2S_BLOCK_ALIGN`, `AUDIO_I2S_BLOCK_BYTES()`). Its clock role is fixed at target
+(`AUDIO_I2S_IN_RX_OPTIONS`) and has no controller counterpart, because nothing needs one:
+where the host generates the clocks, one direction generates them and the other receives
+them, and the transmit block is the one that has the MCLK pin.
 `AUDIO_I2S_IN_NODE_DEFINE(name, node_id, frame_samples, blocks)` takes no upstream, because
 a source has none, and allocates the node, its `audio_i2s_in_state` and its `k_mem_slab`.
 Four decisions are contract, and the first one is the one the pipeline cannot recover from:

@@ -16,10 +16,19 @@
 
 #include <zephyr/audio/audio_i2s_wire.h>
 
-/* The one depth v1 carries; everything else must be refused, not approximated. */
+/* The narrow depth: the one the file nodes speak. Named WIRE_BITS because every
+ * case below that is not about a particular depth uses it.
+ */
 #define WIRE_BITS 16U
 
-/* A depth the container can hold but the link cannot carry yet. */
+/* The wide depth: a 32 bit slot, which is what a codec whose converter word is
+ * narrower than its slot needs (issue #47).
+ */
+#define WIRE_BITS_WIDE 32U
+
+/* A depth the container can hold but the link deliberately does not carry: a
+ * three byte word.
+ */
 #define UNSUPPORTED_BITS 24U
 
 /* Full scale in both directions plus the values a naive (int16_t) cast of the
@@ -135,6 +144,77 @@ ZTEST(audio_i2s_wire, test_i2s_wire_leaves_the_rest_of_the_block_untouched)
 	 */
 	zassert_equal(wire[4], 0xa5, "the tail of the block was rewritten");
 	zassert_equal(wire[7], 0xa5, "the tail of the block was rewritten");
+}
+
+ZTEST(audio_i2s_wire, test_i2s_wire_describes_a_wide_word)
+{
+	struct audio_i2s_wire_format fmt = {0};
+
+	zassert_ok(audio_i2s_wire_format_get(WIRE_BITS_WIDE, &fmt));
+	zassert_equal(fmt.word_bits, WIRE_BITS_WIDE);
+	zassert_equal(fmt.word_bytes, WIRE_BITS_WIDE / 8U);
+	/* The block sizing constant has to cover the widest word or every block
+	 * already defined would be short by half.
+	 */
+	zassert_equal(fmt.word_bytes, AUDIO_I2S_WIRE_MAX_WORD_BYTES,
+		      "a 32 bit word is the widest the container can produce");
+}
+
+ZTEST(audio_i2s_wire, test_i2s_wire_carries_a_wide_word_unchanged)
+{
+	uint8_t wire[ARRAY_SIZE(container_samples) * sizeof(uint32_t)];
+	int32_t back[ARRAY_SIZE(container_samples)];
+	size_t i;
+
+	memset(wire, 0xa5, sizeof(wire));
+
+	zassert_ok(audio_i2s_wire_from_container(WIRE_BITS_WIDE, container_samples,
+						 ARRAY_SIZE(container_samples), wire,
+						 sizeof(wire)));
+
+	/* Little endian, i.e. the memory order the CPU itself uses. A driver
+	 * whose DMA is as wide as the word sees exactly the container sample.
+	 */
+	for (i = 0; i < ARRAY_SIZE(container_samples); i++) {
+		zassert_equal((int32_t)sys_get_le32(&wire[i * sizeof(uint32_t)]),
+			      container_samples[i], "sample %zu changed on the way to the wire", i);
+	}
+
+	zassert_ok(audio_i2s_wire_to_container(WIRE_BITS_WIDE, wire, sizeof(wire), back,
+					       ARRAY_SIZE(back)));
+
+	/* Nothing is discarded at this depth, so the round trip is bit
+	 * identical for every value - including the two full scales, which a
+	 * narrowing link can only carry approximately.
+	 */
+	zassert_mem_equal(back, container_samples, sizeof(container_samples),
+			  "a 32 bit link lost information it had no place to lose it in");
+}
+
+ZTEST(audio_i2s_wire, test_i2s_wire_keeps_the_two_depths_apart)
+{
+	uint8_t wire[2 * sizeof(uint32_t)];
+	int32_t samples[2] = {(int32_t)0x12345678, (int32_t)0xfedcba98};
+	int32_t back[2] = {0};
+
+	zassert_ok(audio_i2s_wire_from_container(WIRE_BITS_WIDE, samples, ARRAY_SIZE(samples), wire,
+						 sizeof(wire)));
+
+	/* Reading a 32 bit block back as 16 bit words must not quietly succeed
+	 * with half the samples: the two depths describe different blocks, and
+	 * a link that mixed them would drift a channel per word.
+	 */
+	zassert_ok(audio_i2s_wire_to_container(WIRE_BITS, wire, sizeof(wire), back,
+					       ARRAY_SIZE(back)));
+	zassert_not_equal(back[0], samples[0],
+			  "a 16 bit read of a 32 bit block cannot reproduce the samples");
+
+	/* And a block sized for narrow words cannot hold the same count of wide
+	 * ones - that is refused rather than truncated.
+	 */
+	zassert_equal(audio_i2s_wire_from_container(WIRE_BITS_WIDE, samples, ARRAY_SIZE(samples),
+						    wire, ARRAY_SIZE(samples) * sizeof(uint16_t)),
+		      -EINVAL);
 }
 
 ZTEST(audio_i2s_wire, test_i2s_wire_refuses_an_unsupported_depth)

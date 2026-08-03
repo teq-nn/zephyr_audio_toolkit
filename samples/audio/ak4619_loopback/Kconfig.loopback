@@ -1,0 +1,59 @@
+# Choices that belong to the loopback application rather than to the codec
+# driver, kept in a file of their own because two Kconfig roots need them: the
+# sample's, and the native_sim test suite's - the suite compiles src/ of this
+# sample, so it has to see the same symbols the sample was written against.
+#
+# Only what a human at a bench might have to change on the day is here.
+# Everything else - the tone frequencies, the analyzer window, the pass/fail
+# thresholds - is derived in src/loopback_format.h and src/loopback_verdict.h,
+# because those numbers are tied to each other and to the levels in
+# docs/hardware/akd4619-evaluation-board.md §4.5. A Kconfig symbol per threshold
+# would let them be changed apart, which is the one thing that must not happen.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+choice
+	prompt "I2S slot length on the wire"
+	default AK4619_LOOPBACK_SLOT_32
+	help
+	  How many bit clocks one channel occupies. Both settings run MCLK at
+	  256 fs, which is the ratio the AK4619's FS[2:0] = 000 row expects
+	  (datasheet p.31, Table 1) and the only one this application uses: the
+	  STM32 I2S driver compensates for its own master-clock divider, so
+	  MCLK is 256 fs at either slot length and only BICK changes
+	  (drivers/i2s/i2s_stm32.c at Zephyr v4.4.1 - `bit_clk_freq *=
+	  channel_length == 16U ? 4U * 2U : 4U`).
+
+	  The choice therefore is not about the clock ratio. It is about how
+	  wide a word crosses the wire, and the two settings fail differently.
+
+config AK4619_LOOPBACK_SLOT_32
+	bool "32-bit slots, BICK 64 fs"
+	help
+	  The part's own default slot length, and the one that carries the
+	  ADC's full 24-bit word: DODL has no 32-bit setting, so the ADC word
+	  arrives MSB-justified in the slot with its low 8 bits zero
+	  (datasheet p.33 Table 7, p.34 Figure 12).
+
+	  KNOWN RISK, and the reason the other setting exists: Zephyr's STM32
+	  I2S driver configures its DMA with a fixed 16-bit transfer width
+	  whatever word_size says, so a 32-bit word reaches the peripheral as
+	  two halves and the peripheral decides which half is the MSB. If that
+	  order is the opposite of the little-endian one the wire seam writes,
+	  the loop still runs at the right rate and still carries energy - what
+	  comes back is the halves swapped, which the analyzer reports as noise
+	  rather than as silence. See the sample's README.
+
+config AK4619_LOOPBACK_SLOT_16
+	bool "16-bit slots, BICK 32 fs"
+	help
+	  The fallback. 32 fs is the bottom of the BICK range FS[2:0] = 000
+	  allows (32-256 fs, datasheet p.31), and 16-bit words are the depth
+	  Zephyr's STM32 I2S driver moves with a DMA of matching width, so this
+	  setting has no half-word order to get wrong. The cost is resolution:
+	  the capture is 16-bit, about 96 dB of range instead of 144, which is
+	  far more than any threshold in this application depends on.
+
+	  Try this first if the 32-bit run reports energy without a tone.
+
+endchoice
