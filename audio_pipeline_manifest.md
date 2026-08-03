@@ -229,6 +229,7 @@ zephyr-audio-pipeline/
 ├─ include/zephyr/audio/
 │  ├─ audio_format.h
 │  ├─ audio_node.h
+│  ├─ audio_i2s_wire.h     # I2S container <-> wire words, one layout, both directions
 │  ├─ audio_nodes.h        # per-node state types, ops externs, node DEFINE macros
 │  ├─ audio_pipeline.h
 │  ├─ audio_pipeline_events.h
@@ -241,11 +242,13 @@ zephyr-audio-pipeline/
 │  ├─ audio_pipeline_events.c
 │  ├─ audio_node_core.c
 │  ├─ audio_internal.h
+│  ├─ audio_i2s_wire.c
 │  ├─ audio_wav.c
 │  └─ nodes/
 │      ├─ file_reader_node.c
 │      ├─ file_writer_node.c
 │      ├─ gain_filter_node.c
+│      ├─ i2s_out_node.c
 │      └─ null_sink_node.c
 ├─ samples/audio/pipeline_basic/
 │  ├─ CMakeLists.txt
@@ -272,6 +275,11 @@ zephyr-audio-pipeline/
    │  ├─ test_events.c               # k_msgq event queue
    │  ├─ test_file_reader.c          # WAV source, S16→S32 widening
    │  └─ test_file_writer.c          # WAV sink, S32→S16 truncation
+   ├─ i2s_wire/                  # container <-> wire arithmetic, no I2S device needed
+   │  ├─ CMakeLists.txt
+   │  ├─ prj.conf
+   │  ├─ testcase.yaml
+   │  └─ test_i2s_wire.c
    ├─ no_file_nodes/             # node selection: file nodes off, FILE_SYSTEM stays out
    │  ├─ CMakeLists.txt
    │  ├─ prj.conf
@@ -283,13 +291,20 @@ zephyr-audio-pipeline/
       ├─ testcase.yaml
       └─ test_wav.c              # header write/read round trip, parser errors
 └─ tests/boards/nucleo_h723zg/   # board bring-up: asserts about hardware, not the subsystem
-   └─ i2s_smoke/
+   ├─ i2s_smoke/
+   │  ├─ CMakeLists.txt
+   │  ├─ prj.conf
+   │  ├─ testcase.yaml           # platform_allow: nucleo_h723zg, so native_sim filters it out
+   │  ├─ boards/
+   │  │  └─ nucleo_h723zg.overlay  # two slave I2S blocks (i2s2 TX, i2s3 RX) + dma1/dmamux1
+   │  └─ test_i2s_smoke.c        # both I2S devices and the control I2C come up ready
+   └─ i2s_out_node/              # the I2S sink on real silicon; no frame is pulled
       ├─ CMakeLists.txt
       ├─ prj.conf
-      ├─ testcase.yaml           # platform_allow: nucleo_h723zg, so native_sim filters it out
+      ├─ testcase.yaml
       ├─ boards/
-      │  └─ nucleo_h723zg.overlay  # two slave I2S blocks (i2s2 TX, i2s3 RX) + dma1/dmamux1
-      └─ test_i2s_smoke.c        # both I2S devices and the control I2C come up ready
+      │  └─ nucleo_h723zg.overlay  # includes the smoke test's overlay rather than copying it
+      └─ test_i2s_out_node.c     # block DMA reachability/alignment, clock role, open/close
 ```
 
 `tests/boards/nucleo_h723zg/i2s_smoke/boards/nucleo_h723zg.overlay` is the one place the board's

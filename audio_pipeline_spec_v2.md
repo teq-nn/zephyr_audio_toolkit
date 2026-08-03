@@ -516,15 +516,19 @@ config AUDIO_PIPELINE_NODE_FILE_WRITER
 config AUDIO_PIPELINE_NODE_GAIN_FILTER
     bool "Gain filter node"
 
+config AUDIO_PIPELINE_NODE_I2S_OUT
+    bool "I2S output sink node"
+    select I2S
+
 config AUDIO_PIPELINE_NODE_NULL_SINK
     bool "Null sink node"
 ```
 
-- All four default to `n`. A node is only reachable through its `*_NODE_DEFINE()` macro, so an
+- All five default to `n`. A node is only reachable through its `*_NODE_DEFINE()` macro, so an
   application always knows which nodes it uses and says so in `prj.conf`; the module ships lean and
   a target with no storage pays for no filesystem.
 - A node's dependencies belong to the node's symbol. `FILE_SYSTEM` is selected by the two file
-  nodes, never by `AUDIO_PIPELINE`.
+  nodes and `I2S` by the I2S sink, never by `AUDIO_PIPELINE`.
 - Each symbol gates the node's source file, its state type, its `<role>_node_ops` extern and its
   `*_NODE_DEFINE()` macro. Using the macro of a node that was not built expands to a placeholder
   node plus a failing `BUILD_ASSERT` naming the macro and the Kconfig symbol that builds it, so the
@@ -833,6 +837,77 @@ int audio_wav_write_header(uint8_t *buf, size_t len, const struct audio_wav_head
   supplies the stream description and the module lays out the bytes; the same
   holds for the reference sample and the test fixture.
 
+### 10.4 I2S output sink node
+
+- Task:
+  - Accepts S32_LE from the chain,
+  - narrows it to the link's wire words through the shared seam of §10.5,
+  - hands the result to a Zephyr I2S device as a clock **target**.
+
+The Zephyr I2S API is `mem_slab` based: the caller allocates a block, fills it and
+`i2s_write()` takes ownership until the transfer completes. The pipeline hands a node a
+*borrowed* frame buffer it reuses for the next frame (§4.1), so the copy at this boundary
+is the seam between the two ownership models, not an oversight. Four decisions are
+contract:
+
+- **The macro allocates the blocks.** `AUDIO_I2S_OUT_NODE_DEFINE(name, upstream, node_id,
+  frame_samples, blocks)` allocates the node, its `audio_i2s_out_state` **and its
+  `k_mem_slab`**, so two instances never hand a driver the same memory (§11.1). The device
+  comes from the devicetree node identifier, never from a name resolved at run time, so a
+  chain wired to a peripheral the board lacks fails to build rather than to start.
+- **Block size follows the frame capacity, not Kconfig.** `frame_samples` is the figure the
+  application also passed to `AUDIO_PIPELINE_DEFINE()`; the block is
+  `ROUND_UP(frame_samples * AUDIO_I2S_WIRE_MAX_WORD_BYTES, AUDIO_I2S_OUT_BLOCK_ALIGN)`.
+  Sizing for the widest word the container can produce keeps every definition site correct
+  when the wire seam grows a depth, and the alignment is the cache-line rule of manifest §6
+  — DMA-facing blocks must be line aligned *and* line sized, and must live where the
+  driver's DMA controller can address them.
+- **Target on both clocks, with no path to controller.** `open()` passes
+  `AUDIO_I2S_OUT_TX_OPTIONS`, i.e. `I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT_CLK_TARGET`, and
+  there is no Kconfig option beside it: the controller constants are zero bits, so
+  "controller" is the *absence* of these two rather than a value the node could pass.
+- **Underrun is a state, not an event.** A TX underrun parks the direction in
+  `I2S_STATE_ERROR`, where every write is rejected until `I2S_TRIGGER_PREPARE` clears it. A
+  failed write is therefore first answered with prepare-and-restart and only reported once
+  the retry fails too, so a node that has underrun does not stay wedged. `close()` uses
+  `I2S_TRIGGER_DROP`, never `DRAIN`: a clock target draining a queue no master is clocking
+  would wait forever, and DROP also returns every queued block to the slab so the next
+  `open()` succeeds.
+
+Sample rate and channel count are read from `node->pipeline_format` on every use and stored
+nowhere (§5.2). Blocking inside `process()` is deliberate and is the pacing mechanism:
+manifest §3.2 permits it and `audio_pipeline_stop()` is asynchronous so it cannot deadlock
+behind it (§8.2).
+
+### 10.5 I2S wire format module (shared)
+
+The container-to-wire conversion is a module of its own,
+`include/zephyr/audio/audio_i2s_wire.h` + `subsys/audio/pipeline/audio_i2s_wire.c`, for the
+same reason as §10.3: it is shared by both ends of an I2S link — the output sink narrows
+containers into a block the driver transmits, the input source widens a received block back
+— and two copies of one mapping would drift apart.
+
+```c
+int audio_i2s_wire_format_get(uint8_t valid_bits_per_sample, struct audio_i2s_wire_format *out);
+int audio_i2s_wire_from_container(uint8_t valid_bits_per_sample, const int32_t *samples,
+                                  size_t count, uint8_t *wire, size_t len);
+int audio_i2s_wire_to_container(uint8_t valid_bits_per_sample, const uint8_t *wire, size_t len,
+                                int32_t *samples, size_t count);
+```
+
+- **One gate on the supported depths.** `audio_i2s_wire_format_get()` answers what to tell
+  the driver (`word_bits`, which is `i2s_config.word_size`) and how much room a block needs
+  (`word_bytes`) together, and every conversion refuses exactly what it refuses. A node
+  validates a bound format by asking here once in `open()` (§5.2).
+- **v1 carries 16-bit words**, matching the file nodes at the other end of the pipeline. The
+  arithmetic is §5.3 verbatim — `s16 = s32 >> 16` out, `s32 = s16 << 16` back — so the two
+  directions are exact inverses and a wire round trip is bit identical. Wider words are not
+  merely unimplemented: on the STM32 I2S register file a 24- or 32-bit word moves as two
+  16-bit halves in an order the container does not describe, which cannot be settled without
+  hardware to verify it.
+- **Allocation free, driver free, endianness explicit**, so it is testable on a host with no
+  I2S device at all (`tests/subsys/audio/i2s_wire/`).
+
 ---
 
 ## 11. Memory & Module Structure
@@ -917,6 +992,7 @@ zephyr-audio-pipeline/
 │  └─ zephyr/
 │     └─ audio/
 │        ├─ audio_format.h
+│        ├─ audio_i2s_wire.h     # I2S container <-> wire words, one layout, both directions
 │        ├─ audio_node.h
 │        ├─ audio_nodes.h        # per-node state types, ops externs, node DEFINE macros
 │        ├─ audio_pipeline.h
@@ -932,11 +1008,13 @@ zephyr-audio-pipeline/
 │        ├─ audio_pipeline_events.c
 │        ├─ audio_node_core.c
 │        ├─ audio_internal.h
+│        ├─ audio_i2s_wire.c
 │        ├─ audio_wav.c
 │        └─ nodes/
 │            ├─ file_reader_node.c
 │            ├─ file_writer_node.c
 │            ├─ gain_filter_node.c
+│            ├─ i2s_out_node.c
 │            └─ null_sink_node.c
 ├─ samples/
 │  └─ audio/
