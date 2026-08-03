@@ -7,6 +7,7 @@ zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE
 	audio_pipeline_config.c
 	audio_pipeline_events.c
 	audio_node_core.c
+	audio_i2s_wire.c
 	audio_wav.c
 )
 
@@ -15,4 +16,6 @@ zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE
 zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE_NODE_FILE_READER nodes/file_reader_node.c)
 zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER nodes/file_writer_node.c)
 zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER nodes/gain_filter_node.c)
+zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT nodes/i2s_out_node.c)
 zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK nodes/null_sink_node.c)
+zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN nodes/tone_gen_node.c)

@@ -6,3 +6,6 @@ twister-out.*/
 
 # west workspace metadata (only present when this repo is the manifest repo)
 .west/
+
+# Scratch git worktrees an agent session checks out; never part of a change.
+.claude/worktrees/

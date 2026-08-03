@@ -20,15 +20,25 @@
 #define ZEPHYR_AUDIO_NODES_H_
 
 #include <stdbool.h>
+#include <zephyr/sys/util.h>
+#include <zephyr/sys/util_macro.h>
 #include <zephyr/toolchain.h>
 #include <zephyr/types.h>
 
 #include <zephyr/audio/audio_format.h>
+#include <zephyr/audio/audio_i2s_wire.h>
 #include <zephyr/audio/audio_node.h>
 
 #if defined(CONFIG_AUDIO_PIPELINE_NODE_FILE_READER) || \
 	defined(CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER)
 #include <zephyr/fs/fs.h>
+#endif
+
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/i2s.h>
+#include <zephyr/kernel.h>
 #endif
 
 /**
@@ -247,6 +257,160 @@ extern const struct audio_node_ops gain_filter_node_ops;
 #endif /* CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER */
 
 /* -------------------------------------------------------------------------
+ * I2S output sink node
+ * -------------------------------------------------------------------------
+ */
+
+/**
+ * @brief Alignment and size granularity of one I2S transfer block.
+ *
+ * Static allocation says how much memory a node gets, not where or how it is
+ * shaped, and a DMA-driven I2S driver cares about both (manifest §6). The
+ * drivers this node targets do their own cache maintenance around every
+ * transfer - @c sys_cache_data_flush_range() before TX - and that acts on whole
+ * cache lines, so a block that is not line aligned *and* line sized lets a
+ * flush clobber whatever shares its first or last line.
+ *
+ * The floor of 32 is the Cortex-M7 line of the first hardware target. It is
+ * kept even where the line is smaller or where there is no cache at all,
+ * because over-alignment costs a few bytes of padding while under-alignment
+ * costs silent corruption, and a target-dependent block size would make the
+ * build-time arithmetic below unauditable.
+ *
+ * Where the block *lives* is the other half of the rule and is not expressible
+ * here: the slab lands in @c .noinit, i.e. in the image's @c zephyr,sram, which
+ * on the nucleo_h723zg target is the AXI SRAM that dma1 can address. A target
+ * that puts @c zephyr,sram somewhere its I2S DMA cannot reach - DTCM on an
+ * STM32H7 - needs the slab relocated, not merely realigned.
+ */
+#if defined(CONFIG_DCACHE_LINE_SIZE) && (CONFIG_DCACHE_LINE_SIZE > 32)
+#define AUDIO_I2S_OUT_BLOCK_ALIGN CONFIG_DCACHE_LINE_SIZE
+#else
+#define AUDIO_I2S_OUT_BLOCK_ALIGN 32
+#endif
+
+/**
+ * @brief Bytes one transfer block needs for @p _frame_samples container samples.
+ *
+ * Sized from the frame capacity the pipeline hands the node and never from
+ * @kconfig{CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES}: the block has to hold what
+ * arrives in a frame, and whether that Kconfig symbol counts total or
+ * per-channel samples is not this node's question to answer (issue #23). The
+ * application passes the same figure it gave AUDIO_PIPELINE_DEFINE(), so a
+ * change of meaning there moves both allocations together.
+ *
+ * The width factor is ::AUDIO_I2S_WIRE_MAX_WORD_BYTES rather than the width the
+ * bound format happens to use, because the format is bound at run time and this
+ * has to be a constant. Sizing for the widest word the container can ever
+ * produce is what keeps every definition site correct when the wire seam grows
+ * a depth.
+ */
+#define AUDIO_I2S_OUT_BLOCK_BYTES(_frame_samples)                                                  \
+	ROUND_UP((size_t)(_frame_samples) * AUDIO_I2S_WIRE_MAX_WORD_BYTES,                         \
+		 AUDIO_I2S_OUT_BLOCK_ALIGN)
+
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT
+
+/**
+ * @brief Clock role the sink configures, fixed at target (slave).
+ *
+ * The codec is the clock master for the systems this node is built for; it owns
+ * MCLK, BCK and LRCK, and a second device driving any of them is contention on
+ * a shared wire. There is deliberately no counterpart to this macro and no
+ * Kconfig option beside it: @c I2S_OPT_BIT_CLK_CONTROLLER and
+ * @c I2S_OPT_FRAME_CLK_CONTROLLER are zero bits, so "controller" is not a value
+ * the node could pass by accident - it is the absence of the two below, and
+ * they are always present.
+ *
+ * Named here rather than left inside the node body so that a board suite can
+ * assert the clock role at build time.
+ */
+#define AUDIO_I2S_OUT_TX_OPTIONS (I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT_CLK_TARGET)
+
+/** @brief Per-instance state of the I2S output sink node. */
+struct audio_i2s_out_state {
+	/** I2S device, resolved from devicetree by the definition macro. */
+	const struct device *dev;
+	/**
+	 * Transfer blocks the driver takes ownership of, owned by the definition
+	 * macro. Per instance, so two sinks never hand a driver the same memory.
+	 */
+	struct k_mem_slab *slab;
+	/** Bytes in one @ref slab block, owned by the definition macro. */
+	size_t block_bytes;
+
+	/*
+	 * Everything below belongs to the node implementation. It is only
+	 * meaningful between a successful open() and the matching close(), and
+	 * an application must treat it as read-only.
+	 *
+	 * There is deliberately no sample rate and no channel count here: they
+	 * are pipeline-wide, owned by the pipeline, and read from
+	 * audio_node.pipeline_format wherever they are needed (manifest §4).
+	 */
+
+	/** True once open() has configured the transmit direction. */
+	bool configured;
+	/** True while the transmit direction has been started and not stopped. */
+	bool started;
+};
+
+extern const struct audio_node_ops i2s_out_node_ops;
+
+/**
+ * @brief Statically define an I2S output sink node.
+ *
+ * File scope only. Allocates the node, its ::audio_i2s_out_state **and its
+ * @c k_mem_slab**, so two instances never share transfer blocks.
+ * Needs @kconfig{CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT}.
+ *
+ * The device comes from devicetree rather than from a name looked up at run
+ * time, so a chain wired to a peripheral the board does not have fails to build
+ * instead of failing to start.
+ *
+ * @param _name          Symbol name of the @ref audio_node instance.
+ * @param _upstream      Pointer to the upstream node.
+ * @param _node_id       Devicetree node identifier of the I2S device, e.g.
+ *                       @c DT_ALIAS(i2s_tx). Must be @c okay.
+ * @param _frame_samples Frame capacity the pipeline hands this node, in total
+ *                       interleaved samples - the same figure passed to
+ *                       AUDIO_PIPELINE_DEFINE(). Sizes the transfer blocks; a
+ *                       frame larger than one block is still transmitted, in
+ *                       several blocks.
+ * @param _blocks        Transfer blocks to allocate. The I2S API needs at least
+ *                       two per queue; more of them buys tolerance against a
+ *                       late producer at the cost of latency.
+ */
+#define AUDIO_I2S_OUT_NODE_DEFINE(_name, _upstream, _node_id, _frame_samples, _blocks)             \
+	BUILD_ASSERT(DT_NODE_HAS_STATUS_OKAY(_node_id),                                            \
+		     "AUDIO_I2S_OUT_NODE_DEFINE(" #_name "): " #_node_id                           \
+		     " is not an enabled devicetree node");                                        \
+	BUILD_ASSERT((_frame_samples) >= 2,                                                        \
+		     "AUDIO_I2S_OUT_NODE_DEFINE(" #_name "): frame_samples is the TOTAL "          \
+		     "interleaved sample count and must hold at least one stereo sample "          \
+		     "set (>= 2), like AUDIO_PIPELINE_DEFINE()");                                  \
+	BUILD_ASSERT((_blocks) >= 2,                                                               \
+		     "AUDIO_I2S_OUT_NODE_DEFINE(" #_name "): the I2S API needs at least "          \
+		     "two transfer blocks per queue");                                             \
+	K_MEM_SLAB_DEFINE_STATIC(_name##_slab, AUDIO_I2S_OUT_BLOCK_BYTES(_frame_samples),          \
+				 (_blocks), AUDIO_I2S_OUT_BLOCK_ALIGN);                            \
+	static struct audio_i2s_out_state _name##_state = {                                        \
+		.dev = DEVICE_DT_GET(_node_id),                                                    \
+		.slab = &_name##_slab,                                                             \
+		.block_bytes = AUDIO_I2S_OUT_BLOCK_BYTES(_frame_samples),                          \
+	};                                                                                         \
+	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SINK, &i2s_out_node_ops, (_upstream),             \
+			  &_name##_state)
+
+#else /* CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT */
+
+#define AUDIO_I2S_OUT_NODE_DEFINE(_name, _upstream, _node_id, _frame_samples, _blocks)             \
+	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_SINK, "AUDIO_I2S_OUT_NODE_DEFINE",           \
+			       "AUDIO_PIPELINE_NODE_I2S_OUT")
+
+#endif /* CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT */
+
+/* -------------------------------------------------------------------------
  * Null sink node
  * -------------------------------------------------------------------------
  */
@@ -275,5 +439,116 @@ extern const struct audio_node_ops null_sink_node_ops;
 			       "AUDIO_PIPELINE_NODE_NULL_SINK")
 
 #endif /* CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK */
+
+/* -------------------------------------------------------------------------
+ * Tone generator source node
+ * -------------------------------------------------------------------------
+ */
+
+/** @brief Q15 full scale: table value * AUDIO_TONE_GEN_FULL_SCALE_Q15 >> 15. */
+#define AUDIO_TONE_GEN_FULL_SCALE_Q15 32768
+
+/**
+ * @brief Tones one tone generator definition can name.
+ *
+ * The v1 channel range (spec §5.2), because a definition names exactly one
+ * frequency per channel.
+ */
+#define AUDIO_TONE_GEN_MAX_TONES 2
+
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN
+
+/** @brief Per-instance state of the tone generator source node. */
+struct audio_tone_gen_state {
+	/**
+	 * Frequency of each channel's tone in Hz, in channel order, owned by
+	 * the definition macro. Per channel rather than per node on purpose:
+	 * left and right carrying different tones is how an analyzer downstream
+	 * tells a swapped pair of wires from a correct one.
+	 */
+	uint32_t freq_hz[AUDIO_TONE_GEN_MAX_TONES];
+	/**
+	 * Frequencies the definition named, i.e. how many entries of
+	 * @ref freq_hz are configuration rather than padding.
+	 *
+	 * Not a channel count: the channel count is the pipeline's and is read
+	 * from @c audio_node.pipeline_format (spec §5.2). This is what open()
+	 * checks *against* it, and a definition naming a different number of
+	 * tones than the pipeline carries is refused rather than adapted.
+	 */
+	uint8_t tone_count;
+	/**
+	 * Peak amplitude as a fraction of full scale in Q15;
+	 * ::AUDIO_TONE_GEN_FULL_SCALE_Q15 is full scale and 0 is silence.
+	 */
+	int32_t amplitude_q15;
+	/**
+	 * Samples to produce before the stream ends, counted as TOTAL
+	 * interleaved samples across all channels like every other sample count
+	 * in the subsystem (manifest §5), so it has to be a whole number of
+	 * interleaved sample sets.
+	 *
+	 * 0 runs indefinitely, which is what a loopback under test wants: it is
+	 * stopped by the application, not by the stimulus running out.
+	 */
+	uint32_t duration_samples;
+
+	/*
+	 * Everything below belongs to the node implementation. It is only
+	 * meaningful between a successful open() and the matching close(), and
+	 * an application must treat it as read-only.
+	 */
+
+	/** Phase of each tone as a fraction of a turn in 32 bit fixed point. */
+	uint32_t phase[AUDIO_TONE_GEN_MAX_TONES];
+	/** Phase added per sample, derived from the bound rate by open(). */
+	uint32_t phase_step[AUDIO_TONE_GEN_MAX_TONES];
+	/** Samples produced since open(), against @ref duration_samples. */
+	uint32_t produced;
+	/** True between a successful open() and its close(). */
+	bool is_open;
+};
+
+extern const struct audio_node_ops tone_gen_node_ops;
+
+/**
+ * @brief Statically define a tone generator source node.
+ *
+ * File scope only. Allocates the node and its ::audio_tone_gen_state.
+ * Needs @kconfig{CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN}.
+ *
+ * The frequencies are variadic because how many there are is the statement the
+ * definition makes about the pipeline it belongs in: one per channel, in
+ * channel order. open() refuses a pipeline whose channel count says otherwise
+ * rather than dropping or inventing a tone.
+ *
+ * @param _name             Symbol name of the @ref audio_node instance.
+ * @param _amplitude_q15    Peak amplitude in Q15
+ *                          (::AUDIO_TONE_GEN_FULL_SCALE_Q15 is full scale).
+ * @param _duration_samples Total interleaved samples to produce, 0 for an
+ *                          endless stream.
+ * @param ...               One frequency in Hz per channel, at most
+ *                          ::AUDIO_TONE_GEN_MAX_TONES of them.
+ */
+#define AUDIO_TONE_GEN_NODE_DEFINE(_name, _amplitude_q15, _duration_samples, ...)                  \
+	BUILD_ASSERT(NUM_VA_ARGS(__VA_ARGS__) >= 1 &&                                              \
+			     NUM_VA_ARGS(__VA_ARGS__) <= AUDIO_TONE_GEN_MAX_TONES,                 \
+		     "AUDIO_TONE_GEN_NODE_DEFINE() takes one frequency per "                       \
+		     "channel");                                                                   \
+	static struct audio_tone_gen_state _name##_state = {                                       \
+		.freq_hz = {__VA_ARGS__},                                                          \
+		.tone_count = NUM_VA_ARGS(__VA_ARGS__),                                            \
+		.amplitude_q15 = (_amplitude_q15),                                                 \
+		.duration_samples = (_duration_samples),                                           \
+	};                                                                                         \
+	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &tone_gen_node_ops, NULL, &_name##_state)
+
+#else /* CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN */
+
+#define AUDIO_TONE_GEN_NODE_DEFINE(_name, _amplitude_q15, _duration_samples, ...)                  \
+	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_SOURCE, "AUDIO_TONE_GEN_NODE_DEFINE",        \
+			       "AUDIO_PIPELINE_NODE_TONE_GEN")
+
+#endif /* CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN */
 
 #endif /* ZEPHYR_AUDIO_NODES_H_ */
