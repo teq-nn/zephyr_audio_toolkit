@@ -1,28 +1,70 @@
-# Minimal binding for the AKM AK4619VN audio codec.
+# Binding for the AKM AK4619VN audio codec.
 #
-# It exists so that the codec node in dts/boards/nucleo_h723zg.overlay has
-# something to bind to, and describes only what issue #44 knows: the part sits
-# on an I2C bus at a 7-bit address. Issue #45 owns this file and fills in the
-# properties its driver needs - reset behaviour, the audio interface format,
-# the analog routing. It should extend this file rather than add a second
-# binding for the same compatible somewhere else.
+# Issue #44 added the minimal form of this file so that the codec node in
+# dts/boards/nucleo_h723zg.overlay had something to bind to; issue #45 owns it
+# from here and this is the extended version its driver reads.
+#
+# WHY IT IS STILL HERE AND NOT UNDER THE SAMPLE
+# ---------------------------------------------
+# Issue #45 asks for the binding to live with the sample. It cannot, because
+# the codec node is declared in dts/boards/nucleo_h723zg.overlay, which
+# tests/boards/nucleo_h723zg/{i2s_smoke,i2s_out_node,i2s_in_node} include as
+# well as the sample. A binding reachable only from the sample's own
+# DTS_ROOT would leave those three suites building an unbound node with an
+# unknown compatible. The driver *is* sample-local; its binding has to sit
+# where every consumer of the shared overlay can see it, which is the module
+# root that zephyr/module.yml puts on DTS_ROOT (`settings: dts_root: .`).
+# Nothing in include/zephyr/audio/ or subsys/audio/ references it either way.
 #
 # The vendor prefix is `asahi-kasei`, the one Zephyr's
 # dts/bindings/vendor-prefixes.txt registers for Asahi Kasei Corp. `akm` is not
 # a registered prefix and would draw an unknown-vendor warning.
 #
-# The module root is on DTS_ROOT (zephyr/module.yml, `settings: dts_root: .`),
-# so every consumer of the shared overlay finds this file without listing it.
+# WHY THERE IS NO reset-gpios / pdn-gpios
+# ---------------------------------------
+# The part does have a hardware reset: the PDN pin, whose "L" -> "H" edge is
+# what initialises every register to its default (datasheet p.60). On the
+# AKD4619-A evaluation board that pin is driven by U502, an SN74LVC2G14
+# push-pull buffer fed from the SW500 toggle (evaluation manual p.26 Figure 26
+# and Table 20, p.69 schematic). A host GPIO wired to it would fight the
+# buffer, so #43 recorded PDN as not host-controllable and #45's driver resets
+# the part over the register interface instead - the same thing AKM's own
+# control software offers as its "Write Default" button (manual p.28 item (5)).
+# Issue #45 makes the gpios property conditional on #43 finding the pin
+# board-controllable; it did not, so the property is deliberately absent rather
+# than present-and-never-exercised. A board that does route PDN to a GPIO is
+# the reason to add it, and it should arrive with driver code that uses it.
 #
 # SPDX-License-Identifier: Apache-2.0
 
 description: |
   AKM AK4619VN 4-channel 32-bit 192 kHz audio CODEC.
 
-  MCLK, BICK and LRCK are inputs: the part has no PLL and cannot master the
-  audio clocks, so the host is always the clock source. See
-  docs/hardware/akd4619-evaluation-board.md for the AKD4619-A evaluation board
-  this is wired against.
+  Control interface
+    The part speaks I2C or SPI, selected by a pin (SW-I2CN on the evaluation
+    board); this binding covers the I2C mode only, which is also what the part
+    falls back to after a power-down release (datasheet p.53). Registers are
+    8 bits wide at 7-bit sub-addresses 0x00..0x14 - writing 0x15..0x7F is
+    prohibited (datasheet p.60). Reads are random-address reads: sub-address
+    write, repeated start, data byte (datasheet p.58, Figure 41).
+
+  Address
+    The seven address bits are 0010 00 CAD, with CAD taken from the CAD/CSN
+    pin, so `reg` is 0x10 or 0x11 and nothing else (datasheet p.57, Figure 37).
+    On the AKD4619-A, SW502-2 drives CAD and its default is L, giving 0x10.
+
+  Clocking
+    MCLK, BICK and LRCK are inputs: the part has no PLL and cannot master the
+    audio clocks, so the host is always the clock source. There is no property
+    for this because there is no choice to express.
+
+  Identification
+    The AK4619 has no device-ID register. A driver that wants to know the part
+    is really on the bus has to write a known-writable register and read the
+    value back; an address ACK on its own proves very little.
+
+  See docs/hardware/akd4619-evaluation-board.md for the AKD4619-A evaluation
+  board this is wired against.
 
 compatible: "asahi-kasei,ak4619"
 
@@ -31,3 +73,5 @@ include: i2c-device.yaml
 properties:
   reg:
     required: true
+    description: |
+      7-bit I2C address, 0x10 with the CAD pin low or 0x11 with it high.

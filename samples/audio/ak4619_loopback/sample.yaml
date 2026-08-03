@@ -1,0 +1,26 @@
+# Twister metadata for the AK4619 sample.
+#
+# build_only, because the pass/fail this image reports is about a second board
+# on the other end of six wires: there is nothing Twister can assert without an
+# AKD4619-A attached and a human reading the console. CI builds it for
+# nucleo_h723zg so the driver, the binding and the shared overlay stay in step;
+# the hardware result goes on the pull request, per AGENTS.md.
+#
+# platform_allow keeps it off native_sim: the sample resolves the audio-codec
+# alias at build time, and only this board's overlay declares one.
+sample:
+  name: AK4619 codec bring-up
+  description: >
+    Reset an AKM AK4619 over I2C and prove on the console that it is answering,
+    rather than that the bus ACKed into the void.
+tests:
+  sample.audio.ak4619_loopback:
+    build_only: true
+    tags:
+      - audio
+      - board
+      - codec
+    platform_allow:
+      - nucleo_h723zg
+    integration_platforms:
+      - nucleo_h723zg

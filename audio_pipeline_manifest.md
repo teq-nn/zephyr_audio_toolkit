@@ -236,7 +236,9 @@ zephyr-audio-pipeline/
 │  │                             # the codec on the control I2C bus, dma1/dmamux1.
 │  │                             # Outside tests/ and samples/ so both include it.
 │  └─ bindings/audio/
-│     └─ asahi-kasei,ak4619.yaml # minimal codec binding; the driver ticket fills it in
+│     └─ asahi-kasei,ak4619.yaml # codec binding. Stays on the module DTS_ROOT because the
+│                                # board suites include the same overlay; the driver itself
+│                                # ships with the sample, not with the toolkit.
 ├─ include/zephyr/audio/
 │  ├─ audio_format.h
 │  ├─ audio_node.h
@@ -270,6 +272,26 @@ zephyr-audio-pipeline/
 │  ├─ prj.conf
 │  ├─ app.overlay            # zephyr,ram-disk for the generated track
 │  └─ src/main.c
+├─ samples/audio/ak4619_loopback/     # the AK4619 codec bring-up; the driver lives HERE, not
+│  ├─ CMakeLists.txt                  # in subsys/, so the toolkit gains no codec dependency
+│  ├─ Kconfig                         # rsources drivers/Kconfig, then Kconfig.zephyr
+│  ├─ prj.conf
+│  ├─ sample.yaml                     # build_only on nucleo_h723zg
+│  ├─ boards/nucleo_h723zg.overlay    # one-line include of the canonical overlay
+│  ├─ drivers/
+│  │  ├─ Kconfig                      # AK4619_* symbols; shared with the native_sim suite
+│  │  ├─ ak4619.h                     # register map, and the API #46 builds on
+│  │  └─ ak4619.c                     # audio_codec driver: I2C access, reset, link check
+│  └─ src/main.c                      # console verdict: is the part really answering
+├─ tests/samples/audio/ak4619_loopback/
+│  ├─ CMakeLists.txt                  # compiles the sample's driver alongside the suite
+│  ├─ Kconfig                         # rsources the driver's Kconfig from the sample
+│  ├─ app.overlay                     # two codec nodes on native_sim's emulated I2C
+│  ├─ prj.conf
+│  ├─ testcase.yaml
+│  └─ src/
+│     ├─ ak4619_emul.{c,h}            # emulated part: register file, faults, an absent part
+│     └─ test_ak4619.c                # reset, register access, the write/read/verify check
 ├─ tests/subsys/audio/
    ├─ pipeline/
    │  ├─ CMakeLists.txt

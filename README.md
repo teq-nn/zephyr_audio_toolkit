@@ -24,8 +24,10 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
   without reaching into the other; each consumer's own `boards/nucleo_h723zg.overlay` is a
   one-line `#include` of it. The wiring it describes is worked out in
   `docs/hardware/akd4619-evaluation-board.md`.
-- `dts/bindings/audio/asahi-kasei,ak4619.yaml` – minimal binding for the codec node in that
-  overlay; the codec driver's ticket fills it in.
+- `dts/bindings/audio/asahi-kasei,ak4619.yaml` – binding for the codec node in that overlay: the
+  I2C control interface, the register map's shape, the address derivation, and why there is no
+  reset GPIO. It stays here rather than moving under the sample because the board suites include
+  the same overlay and would otherwise see an unbound node.
 - `CMakeLists.txt` – module root; adds `subsys/audio/pipeline`.
 - `Kconfig` – module root menu; `rsource`s the subsystem Kconfig.
 - `include/zephyr/audio/` – public headers other Zephyr applications include:
@@ -38,6 +40,18 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
   `audio_internal.h`, plus `nodes/` (file reader, file writer, gain filter, I2S input, I2S output,
   null sink, tone analyzer, tone generator).
 - `samples/audio/pipeline_basic/` – reference application (`CMakeLists.txt`, `Kconfig`, `src/main.c`).
+- `samples/audio/ak4619_loopback/` – the AKM AK4619 codec on the `nucleo_h723zg` target, and the
+  only place a codec driver exists in this tree. `drivers/ak4619.{c,h}` is a real Zephyr
+  `audio_codec` driver (`DEVICE_DT_INST_DEFINE`, `<zephyr/audio/codec.h>`) that ships with the
+  sample rather than with the toolkit, so nothing under `include/zephyr/audio/` or `subsys/audio/`
+  gains a codec dependency and no `AUDIO_PIPELINE_*` symbol mentions it; `drivers/Kconfig` carries
+  its own `AK4619_*` symbols. `src/main.c` reports on the console whether the part is really
+  answering. Its `boards/nucleo_h723zg.overlay` includes the canonical overlay.
+- `tests/samples/audio/ak4619_loopback/` – the codec driver on `native_sim`, against an emulated
+  AK4619 (`src/ak4619_emul.c`) that models the register file and addressing rules of the datasheet
+  and can be told to misbehave. It covers the reset, the register access and the write/read/verify
+  link check, including the cases where the bus ACKs and nothing latches, and where the part is
+  absent altogether. No hardware and no I2C peripheral.
 - `tests/subsys/audio/pipeline/` – Ztest suites (`test_roundtrip.c`, `test_error_paths.c`); enables
   every shipped node.
 - `tests/subsys/audio/no_file_nodes/` – the other end of the node selection range: only the gain
@@ -116,6 +130,12 @@ west twister -T tests -p native_sim -x=ZEPHYR_EXTRA_MODULES=$PWD
 west twister -T tests -p nucleo_h723zg
 # ...and run it on an attached board
 west twister -T tests -p nucleo_h723zg --device-testing --hardware-map map.yaml
+
+# The AK4619 codec bring-up image, and what CI builds for the hardware target
+west build -b nucleo_h723zg -d build/ak4619 samples/audio/ak4619_loopback \
+    -- -DZEPHYR_EXTRA_MODULES=$PWD
+west flash -d build/ak4619
+CI_TEST_PLATFORM=nucleo_h723zg CI_TEST_PATH=samples ./scripts/ci-test.sh
 ```
 
 `west.yml` pins Zephyr and clones only `picolibc`, `hal_stm32` and `cmsis_6`, which is exactly what

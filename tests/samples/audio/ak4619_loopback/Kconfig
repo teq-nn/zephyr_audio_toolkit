@@ -1,0 +1,9 @@
+# The codec driver is not part of the module, so its Kconfig does not arrive
+# through the module glue the way the pipeline's does. It is rsourced straight
+# from the sample that owns it, which is also what the sample's own Kconfig
+# root does - one definition, two consumers.
+rsource "../../../../samples/audio/ak4619_loopback/drivers/Kconfig"
+
+# A test application supplies the Kconfig root, so the rest of the tree has to
+# be sourced explicitly.
+source "Kconfig.zephyr"

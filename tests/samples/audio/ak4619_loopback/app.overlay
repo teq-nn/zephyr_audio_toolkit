@@ -1,0 +1,32 @@
+/*
+ * Two AK4619 nodes on native_sim's emulated I2C controller, both backed by
+ * src/ak4619_emul.c.
+ *
+ *   ak4619_present (0x10) behaves like a part that is powered and answering.
+ *   ak4619_absent  (0x11) NACKs everything, the way an unpowered evaluation
+ *                         board or a bus with nothing on it does.
+ *
+ * The second node is not decoration: issue #45 requires that a run against an
+ * unpowered board fails with a diagnosable message rather than reporting
+ * success or hanging, and a device that is expected *not* to become ready is
+ * the only way to assert that without hardware. The emulator picks its
+ * behaviour off the address, so the two share one compatible and one binding.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+&i2c0 {
+	status = "okay";
+
+	ak4619_present: audio-codec@10 {
+		compatible = "asahi-kasei,ak4619";
+		reg = <0x10>;
+		status = "okay";
+	};
+
+	ak4619_absent: audio-codec@11 {
+		compatible = "asahi-kasei,ak4619";
+		reg = <0x11>;
+		status = "okay";
+	};
+};

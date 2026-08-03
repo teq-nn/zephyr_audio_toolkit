@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run the audio pipeline Ztest suites headlessly with Twister.
+# Run the audio pipeline Ztest suites - or the samples - headlessly with Twister.
 #
 # This script is the *only* place the test invocation is spelled out: CI
 # (.github/workflows/ci.yml) runs exactly this, so a local run and a CI run
@@ -14,6 +14,10 @@
 #   ./scripts/ci-test.sh --no-clean            # keep previous build output
 #   CI_TEST_PLATFORM=native_sim/native/64 ./scripts/ci-test.sh
 #   CI_TEST_PATH=tests/subsys/audio/pipeline ./scripts/ci-test.sh
+#   CI_TEST_PLATFORM=nucleo_h723zg CI_TEST_PATH=samples ./scripts/ci-test.sh
+#       ^ the hardware sample; its sample.yaml is build_only, so this compiles
+#         and stops. Needs the arm-zephyr-eabi toolchain rather than the host
+#         compiler native_sim uses.
 #
 # Environment:
 #   CI_TEST_PLATFORM  Board target passed to `twister -p` (default: native_sim)

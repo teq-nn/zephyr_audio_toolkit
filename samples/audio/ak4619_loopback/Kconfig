@@ -1,0 +1,9 @@
+# Sample application Kconfig root.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+rsource "drivers/Kconfig"
+
+# A sample application supplies the Kconfig root, so the rest of the tree has to
+# be sourced explicitly.
+source "Kconfig.zephyr"

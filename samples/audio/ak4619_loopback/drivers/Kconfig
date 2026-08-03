@@ -1,0 +1,47 @@
+# AK4619 codec driver options.
+#
+# This fragment is `rsource`d by the sample that owns the driver and by the
+# native_sim suite that exercises it, so the two cannot drift apart. It is
+# deliberately outside the AUDIO_PIPELINE_* namespace: issue #42 forbids any
+# pipeline symbol from mentioning the codec.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+config AK4619
+	bool "AKM AK4619 audio codec"
+	default y
+	depends on DT_HAS_ASAHI_KASEI_AK4619_ENABLED
+	select I2C
+	help
+	  Driver for the AKM AK4619VN 4-channel audio codec on an I2C control
+	  bus. It implements Zephyr's audio_codec API and is built with the
+	  sample rather than with the toolkit.
+
+if AK4619
+
+config AK4619_INIT_PRIORITY
+	int "AK4619 initialisation priority"
+	default 60
+	help
+	  Device initialisation priority within POST_KERNEL. It must be higher
+	  than I2C_INIT_PRIORITY so the control bus exists before the codec
+	  tries to use it; the driver asserts that at build time. The default
+	  matches Zephyr's own AUDIO_CODEC_INIT_PRIORITY.
+
+config AK4619_PROBE_TIMEOUT_MS
+	int "How long to wait for the codec to answer, in milliseconds"
+	default 100
+	help
+	  After the datasheet's mandatory 10 ms settling time (p.31, p.40 note
+	  (3)), the driver polls the control bus for this long before giving up
+	  and failing initialisation. The allowance exists because PDN is a
+	  manual toggle on the AKD4619-A evaluation board and may be thrown
+	  slightly after the host has booted; it is bounded so that an unpowered
+	  board fails with a message instead of hanging. Set 0 for a single
+	  attempt.
+
+module = AK4619
+module-str = AK4619 audio codec
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # AK4619

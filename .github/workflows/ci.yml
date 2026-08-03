@@ -31,6 +31,7 @@ on:
       - 'subsys/**'
       - 'tests/**'
       - 'samples/**'
+      - 'dts/**'
       - 'scripts/**'
       - 'CMakeLists.txt'
       - 'Kconfig'
@@ -43,6 +44,7 @@ on:
       - 'subsys/**'
       - 'tests/**'
       - 'samples/**'
+      - 'dts/**'
       - 'scripts/**'
       - 'CMakeLists.txt'
       - 'Kconfig'
@@ -101,5 +103,54 @@ jobs:
             zephyr_audio_toolkit/twister-out/twister.log
             zephyr_audio_toolkit/twister-out/twister.xml
             zephyr_audio_toolkit/twister-out/**/handler.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Cross-compiles the hardware sample. Nothing is executed - there is no
+  # AKD4619-A on a runner, and sample.yaml marks the scenario `build_only` for
+  # that reason. What this job catches is the class of breakage the native_sim
+  # run cannot see at all: the shared board overlay, the codec binding and the
+  # driver that consumes them going out of step. tests/boards/ stays out of it;
+  # those suites are for a bench with a board attached.
+  sample-build:
+    name: sample build_only (nucleo_h723zg)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    env:
+      CI_TEST_PLATFORM: nucleo_h723zg
+      CI_TEST_PATH: samples
+      CI_TEST_OUTDIR: twister-out-samples
+    steps:
+      - name: Check out the module
+        uses: actions/checkout@v7
+        with:
+          path: zephyr_audio_toolkit
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Set up Zephyr workspace and SDK
+        uses: zephyrproject-rtos/action-zephyr-setup@v1.0.14
+        with:
+          app-path: zephyr_audio_toolkit
+          # The STM32H723ZG is Cortex-M7, so this job needs the ARM toolchain
+          # the native_sim job deliberately does not download.
+          toolchains: arm-zephyr-eabi
+
+      - name: Build the samples
+        working-directory: zephyr_audio_toolkit
+        run: ./scripts/ci-test.sh
+
+      - name: Upload Twister results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: twister-out-samples
+          path: |
+            zephyr_audio_toolkit/twister-out-samples/twister.log
+            zephyr_audio_toolkit/twister-out-samples/twister.xml
           if-no-files-found: ignore
           retention-days: 7
