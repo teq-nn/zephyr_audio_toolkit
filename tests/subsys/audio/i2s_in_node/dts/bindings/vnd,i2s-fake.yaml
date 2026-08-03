@@ -1,0 +1,18 @@
+# Scriptable I2S device for the input source suite.
+#
+# The node under test takes its device from devicetree, so testing it on a host
+# needs a devicetree node a driver can bind to. Zephyr's own `vnd,i2s` is not
+# usable here: CONFIG_I2S_TEST turns itself on from DT_HAS_VND_I2S_ENABLED and
+# would define a second device for the same node, and its operations return
+# -ENOTSUP, which is exactly the behaviour this suite has to vary.
+#
+# Zephyr always searches the application directory for bindings, so this file
+# needs no DTS_ROOT entry in CMakeLists.txt.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+description: Scriptable fake I2S controller used by the audio pipeline tests
+
+compatible: "vnd,i2s-fake"
+
+include: base.yaml

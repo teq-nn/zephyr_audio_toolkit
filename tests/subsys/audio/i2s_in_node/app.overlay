@@ -1,0 +1,19 @@
+/*
+ * Two fake I2S controllers, because the suite has to show that two source
+ * instances share no storage - two nodes on one device would share the device
+ * and prove nothing.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	fake_i2s_a: fake-i2s-a {
+		compatible = "vnd,i2s-fake";
+		status = "okay";
+	};
+
+	fake_i2s_b: fake-i2s-b {
+		compatible = "vnd,i2s-fake";
+		status = "okay";
+	};
+};

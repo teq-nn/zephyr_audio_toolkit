@@ -1,0 +1,27 @@
+# I2S input source node on the hardware target. platform_allow keeps it out of
+# the default native_sim run (scripts/ci-test.sh): the node needs an I2S device
+# only this board's devicetree has, so on any other target Twister filters the
+# suite rather than failing it. The behaviour of the node itself is covered
+# without hardware in tests/subsys/audio/i2s_in_node.
+#
+# There is deliberately no `build_only: true`, for the same reason as the sink
+# suite next door: Twister refuses to execute a scenario on a hardware platform
+# unless a device is attached, so `twister -p nucleo_h723zg` builds and stops
+# while `--device-testing` also runs the cases. Setting build_only would take
+# the second half away.
+#
+# Nothing here pulls a frame. A source that is a clock target only advances
+# while the codec clocks it, so an i2s_read() on a board with no master would
+# block forever - capture belongs to the loopback application, not to a board
+# suite.
+tests:
+  audio.board.nucleo_h723zg.i2s_in_node:
+    tags:
+      - audio
+      - audio_pipeline
+      - board
+      - i2s
+    platform_allow:
+      - nucleo_h723zg
+    integration_platforms:
+      - nucleo_h723zg

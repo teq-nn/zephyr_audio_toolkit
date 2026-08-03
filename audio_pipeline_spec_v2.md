@@ -516,12 +516,19 @@ config AUDIO_PIPELINE_NODE_FILE_WRITER
 config AUDIO_PIPELINE_NODE_GAIN_FILTER
     bool "Gain filter node"
 
+config AUDIO_PIPELINE_NODE_I2S_IN
+    bool "I2S input source node"
+    select I2S
+
 config AUDIO_PIPELINE_NODE_I2S_OUT
     bool "I2S output sink node"
     select I2S
 
 config AUDIO_PIPELINE_NODE_NULL_SINK
     bool "Null sink node"
+
+config AUDIO_PIPELINE_NODE_TONE_ANALYZER
+    bool "Tone analyzer sink node"
 
 config AUDIO_PIPELINE_NODE_TONE_GEN
     bool "Tone generator source node"
@@ -531,7 +538,7 @@ config AUDIO_PIPELINE_NODE_TONE_GEN
   application always knows which nodes it uses and says so in `prj.conf`; the module ships lean and
   a target with no storage pays for no filesystem.
 - A node's dependencies belong to the node's symbol. `FILE_SYSTEM` is selected by the two file
-  nodes and `I2S` by the I2S sink, never by `AUDIO_PIPELINE`.
+  nodes and `I2S` by the two I2S nodes, never by `AUDIO_PIPELINE`.
 - Each symbol gates the node's source file, its state type, its `<role>_node_ops` extern and its
   `*_NODE_DEFINE()` macro. Using the macro of a node that was not built expands to a placeholder
   node plus a failing `BUILD_ASSERT` naming the macro and the Kconfig symbol that builds it, so the
@@ -860,7 +867,7 @@ contract:
   chain wired to a peripheral the board lacks fails to build rather than to start.
 - **Block size follows the frame capacity, not Kconfig.** `frame_samples` is the figure the
   application also passed to `AUDIO_PIPELINE_DEFINE()`; the block is
-  `ROUND_UP(frame_samples * AUDIO_I2S_WIRE_MAX_WORD_BYTES, AUDIO_I2S_OUT_BLOCK_ALIGN)`.
+  `ROUND_UP(frame_samples * AUDIO_I2S_WIRE_MAX_WORD_BYTES, AUDIO_I2S_BLOCK_ALIGN)`.
   Sizing for the widest word the container can produce keeps every definition site correct
   when the wire seam grows a depth, and the alignment is the cache-line rule of manifest §6
   — DMA-facing blocks must be line aligned *and* line sized, and must live where the
@@ -910,6 +917,104 @@ int audio_i2s_wire_to_container(uint8_t valid_bits_per_sample, const uint8_t *wi
   hardware to verify it.
 - **Allocation free, driver free, endianness explicit**, so it is testable on a host with no
   I2S device at all (`tests/subsys/audio/i2s_wire/`).
+
+### 10.6 I2S input source node
+
+- Task:
+  - Takes a received block from a Zephyr I2S device configured as a clock **target**,
+  - widens its wire words into the canonical S32_LE container through the shared seam of
+    §10.5,
+  - hands the samples to the chain.
+
+It is the mirror of §10.4 and shares its seam, its block geometry
+(`AUDIO_I2S_BLOCK_ALIGN`, `AUDIO_I2S_BLOCK_BYTES()`) and its clock role.
+`AUDIO_I2S_IN_NODE_DEFINE(name, node_id, frame_samples, blocks)` takes no upstream, because
+a source has none, and allocates the node, its `audio_i2s_in_state` and its `k_mem_slab`.
+Four decisions are contract, and the first one is the one the pipeline cannot recover from:
+
+- **A live input never reports end of stream.** `out_size == 0` — and the `-EPIPE` that
+  carries it — means the track finished (manifest §7): the sink raises EOF and the worker
+  parks. The codec clocks continuously, so a read that produced nothing means the transport
+  failed, and a node answering with an empty frame would report a broken wire as a clean
+  end. Every failure path — read timeout, driver error, an overrun the recovery could not
+  clear, a block too short to hold one interleaved sample set — therefore returns an error
+  and leaves `out_size` at zero.
+- **Every block obtained from the driver is released.** `i2s_read()` passes ownership of a
+  slab block to the caller, and the pipeline's frame buffer is borrowed storage (§4.1), so
+  the block is copied out and handed back. It is released on every path — drained, failed
+  conversion, `close()` — through one function, because a block kept on an error path is
+  invisible until the slab runs dry, long after the leak. A block that carries more than
+  one frame is drained across several frames and returned when the remainder no longer
+  holds an interleaved sample set, so nothing is truncated and nothing is held longer than
+  it carries audio.
+- **Overrun is a state, not an event.** An RX overrun parks the direction in
+  `I2S_STATE_ERROR`, where reads are refused once the valid blocks are drained, until
+  `I2S_TRIGGER_PREPARE` clears it; PREPARE leaves the direction stopped, so reception is
+  started again. A failed read is therefore first answered with prepare-and-restart and only
+  reported once the retry fails too. `close()` uses `I2S_TRIGGER_DROP` for the same reason
+  as the sink, and additionally releases the block the node itself holds — DROP discards the
+  driver's queue but cannot free what `i2s_read()` already handed over.
+- **Blocking is the pacing mechanism.** `i2s_read()` waits for the next block forever
+  (`i2s_config.timeout` is `SYS_FOREVER_MS`), and that wait paces the capture chain against
+  the codec's clock. There is no polling and no timeout-and-continue path: a timeout is a
+  failure, not an empty frame.
+
+`open()` configures the direction and leaves it stopped; the first `process()` starts it, so
+an `open()` that fails leaves nothing running. Sample rate and channel count are read from
+`node->pipeline_format` on every use and stored nowhere (§5.2). The driver is asked for
+whole interleaved sample sets, so the channels of one block cannot shift into the next.
+
+Because every one of these is a property of what the *device* does, the behaviour is
+verified against a scriptable I2S controller on `native_sim`
+(`tests/subsys/audio/i2s_in_node/`); the board suite of the same name asserts only what is
+decided before the first bit arrives, since a clock target with no master would block in
+`i2s_read()` forever.
+
+### 10.7 Tone analyzer node (sink)
+
+- Task:
+  - measures, per channel, how much of the channel's energy sits at the frequency that channel
+    was told to expect,
+  - turns that into a verdict — pass, silent, swapped, wrong frequency or noise.
+
+It is the pass/fail oracle for a loopback, and it **measures rather than compares** because the
+link under test has a fixed but unmeasured latency: a sample-by-sample comparison against the
+transmitted stream fails even when the system is correct, while the magnitude of a frequency
+component does not depend on where the window starts. That offset invariance is the property the
+node exists for; everything below serves it.
+
+- **The result is a value, not a log line.**
+
+  ```c
+  int audio_tone_analyzer_get_result(const struct audio_node *node,
+                                     struct audio_tone_analyzer_result *result);
+  ```
+
+  A Ztest cannot assert against a log and the loopback application needs the verdict to decide, so
+  the completed window is published as a `struct audio_tone_analyzer_result`: the verdict, and per
+  channel the in-band energy at *every* expected frequency, the RMS, and the residual of a
+  one-sinusoid fit. This is the one seam in the node set that crosses a thread boundary — the ops
+  stay confined to the pipeline thread (§3.3), while the getter may be called from any thread, so
+  the node publishes and copies out under a spinlock of its own.
+- **In band against total, never an absolute level.** Energy at the expected frequency is reported
+  as a Q15 fraction of the channel's total energy, so a correct tone is distinguishable from a
+  louder wrong one. An absolute magnitude cannot make that distinction.
+- **Every frequency is measured on every channel.** One measurement per channel would answer "is a
+  tone present", which a swapped pair of wires also answers with yes. Measuring all of them on all
+  of them is what makes `SWAPPED` a verdict rather than a `PASS`.
+- **Integer arithmetic with a proved accumulator bound.** One Goertzel recurrence per (channel,
+  tone) pair, closed with `|X|^2 = s1^2 + s2^2 - 2cos(w)*s1*s2` — an identity that holds for an
+  arbitrary real `w`, so a target between two bins is measured where it is rather than read low.
+  The recurrence state is bounded by `N * max|x| / |sin w|`, far above the magnitude it yields, so
+  the state is `int64_t`, the input is narrowed to the container's top 16 bits, the window is
+  capped by `AUDIO_TONE_ANALYZER_MAX_WINDOW` and `open()` refuses a frequency closer than one bin
+  to DC or Nyquist. Together those make the bound a constant the node asserts at build time.
+  Floating point and libm are absent for the same reason as in the generator.
+
+Sample rate and channel count are read from `node->pipeline_format` and stored nowhere (§5.2).
+`process()` does not block: it pulls, folds the frame into the accumulators and returns. A partial
+window is dropped at end of stream rather than measured short, because a window that never filled
+reads low and would turn a clean EOF into a failure.
 
 ---
 
@@ -1017,8 +1122,10 @@ zephyr-audio-pipeline/
 │            ├─ file_reader_node.c
 │            ├─ file_writer_node.c
 │            ├─ gain_filter_node.c
+│            ├─ i2s_in_node.c
 │            ├─ i2s_out_node.c
 │            ├─ null_sink_node.c
+│            ├─ tone_analyzer_node.c
 │            └─ tone_gen_node.c
 ├─ samples/
 │  └─ audio/

@@ -1,0 +1,11 @@
+# The I2S input source against a scriptable device, so it runs anywhere the
+# rest of the suite does - there is no platform_allow here on purpose, unlike
+# the board suite of the same name under tests/boards/.
+tests:
+  audio.pipeline.i2s_in_node:
+    tags:
+      - audio
+      - audio_pipeline
+      - i2s
+    integration_platforms:
+      - native_sim

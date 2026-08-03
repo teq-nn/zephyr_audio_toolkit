@@ -27,17 +27,23 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
   sink and the I2S source, so the two ends of a link cannot drift apart).
 - `subsys/audio/pipeline/` – the implementation: `audio_pipeline_core.c`, `audio_pipeline_config.c`,
   `audio_pipeline_events.c`, `audio_node_core.c`, `audio_wav.c`, `audio_i2s_wire.c`, the private
-  `audio_internal.h`, plus `nodes/` (file reader, file writer, gain filter, I2S output, null sink,
-  tone generator).
+  `audio_internal.h`, plus `nodes/` (file reader, file writer, gain filter, I2S input, I2S output,
+  null sink, tone analyzer, tone generator).
 - `samples/audio/pipeline_basic/` – reference application (`CMakeLists.txt`, `Kconfig`, `src/main.c`).
 - `tests/subsys/audio/pipeline/` – Ztest suites (`test_roundtrip.c`, `test_error_paths.c`); enables
   every shipped node.
 - `tests/subsys/audio/no_file_nodes/` – the other end of the node selection range: only the gain
-  filter and the null sink are built, and the suite checks that `CONFIG_FILE_SYSTEM` stays out of
-  the generated configuration while a pipeline of the remaining nodes still runs.
+  filter and the null sink are built, and the suite checks that neither `CONFIG_FILE_SYSTEM` nor
+  `CONFIG_I2S` reaches the generated configuration while a pipeline of the remaining nodes still
+  runs.
 - `tests/subsys/audio/wav/` – standalone WAV header unit test (`test_wav.c`), no pipeline needed.
 - `tests/subsys/audio/i2s_wire/` – unit test for the container-to-wire seam the I2S nodes share
   (`test_i2s_wire.c`); pure arithmetic, so it runs on `native_sim` with no I2S device.
+- `tests/subsys/audio/i2s_in_node/` – behaviour suite for the I2S input source, driven by a
+  scriptable I2S device (`fake_i2s.c`) declared in the suite's own overlay and binding, so a read
+  timeout, a driver failure and an RX overrun can be produced on `native_sim`. It is where the
+  rule that a live source never reports end of stream, and that every block goes back to the slab,
+  are actually checked.
 - `tests/boards/nucleo_h723zg/i2s_smoke/` – board bring-up smoke test: two I2S blocks (i2s2 TX,
   i2s3 RX, both clock slaves) and the control I2C report ready. Its
   `boards/nucleo_h723zg.overlay` is the canonical board overlay for the hardware target — the
@@ -48,6 +54,9 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
   blocks' DMA reachability and cache alignment, the clock role and the block-size arithmetic; the
   run-time cases open and close the chain, which needs no external clock. No frame is pulled — a
   clock target only advances while the codec clocks it.
+- `tests/boards/nucleo_h723zg/i2s_in_node/` – the same for the I2S input source on `i2s3`. No frame
+  is pulled here either: a source that is a clock target would block in `i2s_read()` until a master
+  appears, so the node's behaviour is covered by the `native_sim` suite instead.
 
 Headers are installed under the `zephyr/audio/` namespace, so applications include them as
 `#include <zephyr/audio/audio_pipeline.h>`.
@@ -69,8 +78,10 @@ nothing else:
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_READER` | `AUDIO_FILE_READER_NODE_DEFINE()` | selects `FILE_SYSTEM` |
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER` | `AUDIO_FILE_WRITER_NODE_DEFINE()` | selects `FILE_SYSTEM` |
 | `CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER` | `AUDIO_GAIN_FILTER_NODE_DEFINE()` | |
+| `CONFIG_AUDIO_PIPELINE_NODE_I2S_IN` | `AUDIO_I2S_IN_NODE_DEFINE()` | selects `I2S`; device from devicetree, slave only; a live source never reports EOF |
 | `CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT` | `AUDIO_I2S_OUT_NODE_DEFINE()` | selects `I2S`; device and clock role come from devicetree, slave only |
 | `CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK` | `AUDIO_NULL_SINK_NODE_DEFINE()` | |
+| `CONFIG_AUDIO_PIPELINE_NODE_TONE_ANALYZER` | `AUDIO_TONE_ANALYZER_NODE_DEFINE()` | one expected tone per channel; verdict read with `audio_tone_analyzer_get_result()` |
 | `CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN` | `AUDIO_TONE_GEN_NODE_DEFINE()` | one tone per channel |
 
 Using a `*_NODE_DEFINE()` macro whose symbol is off is a build error naming the symbol that fixes
