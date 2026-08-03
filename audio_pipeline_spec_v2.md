@@ -518,9 +518,12 @@ config AUDIO_PIPELINE_NODE_GAIN_FILTER
 
 config AUDIO_PIPELINE_NODE_NULL_SINK
     bool "Null sink node"
+
+config AUDIO_PIPELINE_NODE_TONE_GEN
+    bool "Tone generator source node"
 ```
 
-- All four default to `n`. A node is only reachable through its `*_NODE_DEFINE()` macro, so an
+- They all default to `n`. A node is only reachable through its `*_NODE_DEFINE()` macro, so an
   application always knows which nodes it uses and says so in `prj.conf`; the module ships lean and
   a target with no storage pays for no filesystem.
 - A node's dependencies belong to the node's symbol. `FILE_SYSTEM` is selected by the two file
@@ -937,7 +940,8 @@ zephyr-audio-pipeline/
 │            ├─ file_reader_node.c
 │            ├─ file_writer_node.c
 │            ├─ gain_filter_node.c
-│            └─ null_sink_node.c
+│            ├─ null_sink_node.c
+│            └─ tone_gen_node.c
 ├─ samples/
 │  └─ audio/
 │     └─ pipeline_basic/

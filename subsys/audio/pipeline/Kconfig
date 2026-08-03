@@ -65,6 +65,21 @@ config AUDIO_PIPELINE_NODE_NULL_SINK
 	  Defaults to n so that the node set is opted into explicitly, like
 	  every other node symbol here.
 
+config AUDIO_PIPELINE_NODE_TONE_GEN
+	bool "Tone generator source node"
+	help
+	  Source node that synthesizes a sine tone per channel from an integer
+	  phase accumulator and a static table. Needs no filesystem and no
+	  hardware, which is what makes it the stimulus for a loopback bring-up
+	  test; the per-channel frequency is what lets the far end tell a
+	  swapped pair of wires from a correct one.
+
+	  Integer arithmetic throughout, deliberately: a generator calling
+	  sinf() would put an FPU dependency on every target that defines one.
+
+	  Defaults to n so that the node set is opted into explicitly, like
+	  every other node symbol here.
+
 endmenu
 
 config AUDIO_PIPELINE_FRAME_SAMPLES

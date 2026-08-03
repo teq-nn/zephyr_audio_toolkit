@@ -246,7 +246,8 @@ zephyr-audio-pipeline/
 │      ├─ file_reader_node.c
 │      ├─ file_writer_node.c
 │      ├─ gain_filter_node.c
-│      └─ null_sink_node.c
+│      ├─ null_sink_node.c
+│      └─ tone_gen_node.c
 ├─ samples/audio/pipeline_basic/
 │  ├─ CMakeLists.txt
 │  ├─ Kconfig
@@ -271,7 +272,8 @@ zephyr-audio-pipeline/
    │  ├─ test_static_define.c        # DEFINE macros, multi-instance isolation
    │  ├─ test_events.c               # k_msgq event queue
    │  ├─ test_file_reader.c          # WAV source, S16→S32 widening
-   │  └─ test_file_writer.c          # WAV sink, S32→S16 truncation
+   │  ├─ test_file_writer.c          # WAV sink, S32→S16 truncation
+   │  └─ test_tone_gen.c             # tone source: frequency, phase, duration
    ├─ no_file_nodes/             # node selection: file nodes off, FILE_SYSTEM stays out
    │  ├─ CMakeLists.txt
    │  ├─ prj.conf
