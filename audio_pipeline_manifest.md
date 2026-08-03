@@ -105,6 +105,28 @@ It acts as the binding engineering contract for ongoing development.
   works and `audio_pipeline_start()` reclaims what a join gave back. Concurrency on the built-ins is
   therefore an error the caller sees, not silent memory corruption.
 
+### Where DMA-facing buffers may live
+
+Static allocation says *how much* memory a node gets, not *where*. On a target whose DMA engine
+cannot see all of RAM, a buffer that is merely static is still wrong, and the failure is silent —
+the transfer completes and moves nothing.
+
+The rule for any node that hands a buffer to a DMA-driven driver:
+
+- **The buffer must sit in a region the driver's DMA controller can address.** On the
+  `nucleo_h723zg` target the I2S blocks are served by `dma1`, which lives in the D2 domain and
+  cannot reach DTCM (`0x20000000`) or ITCM. The board's `zephyr,sram` (AXI SRAM at `0x24000000`)
+  is reachable; anything placed in DTCM through `__dtcm_bss_section` or a DTCM
+  `zephyr,memory-region` is not.
+- **The buffer must be cache-line aligned and cache-line sized.** The `st,stm32h7-i2s` driver does
+  its own maintenance around every transfer — `sys_cache_data_flush_range()` before TX,
+  `sys_cache_data_invd_range()` after RX — and those act on whole lines. On the Cortex-M7 the line
+  is 32 bytes, so a buffer that is unaligned, or whose length is not a multiple of the line, lets a
+  flush or invalidate clobber whatever shares its first or last line.
+
+The board overlay at `tests/boards/nucleo_h723zg/i2s_smoke/boards/nucleo_h723zg.overlay` repeats
+this next to the DMA nodes it applies to.
+
 ---
 
 ## 7. Pipeline Behavior at EOF
@@ -216,7 +238,7 @@ zephyr-audio-pipeline/
 │  ├─ prj.conf
 │  ├─ app.overlay            # zephyr,ram-disk for the generated track
 │  └─ src/main.c
-└─ tests/subsys/audio/
+├─ tests/subsys/audio/
    ├─ pipeline/
    │  ├─ CMakeLists.txt
    │  ├─ app.overlay         # zephyr,ram-disk backing the ext2 fixture mount
@@ -240,5 +262,17 @@ zephyr-audio-pipeline/
       ├─ prj.conf
       ├─ testcase.yaml
       └─ test_wav.c              # header write/read round trip, parser errors
+└─ tests/boards/nucleo_h723zg/   # board bring-up: asserts about hardware, not the subsystem
+   └─ i2s_smoke/
+      ├─ CMakeLists.txt
+      ├─ prj.conf
+      ├─ testcase.yaml           # platform_allow: nucleo_h723zg, so native_sim filters it out
+      ├─ boards/
+      │  └─ nucleo_h723zg.overlay  # two slave I2S blocks (i2s2 TX, i2s3 RX) + dma1/dmamux1
+      └─ test_i2s_smoke.c        # both I2S devices and the control I2C come up ready
 ```
+
+`tests/boards/nucleo_h723zg/i2s_smoke/boards/nucleo_h723zg.overlay` is the one place the board's
+audio pinout, the TX/RX block split and the DMA reachability constraint are written down; hardware
+work reuses that overlay rather than restating it.
 This document is our shared engineering contract.

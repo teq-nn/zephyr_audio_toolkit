@@ -1,0 +1,21 @@
+# Board bring-up smoke test. platform_allow keeps it out of the default
+# native_sim run (scripts/ci-test.sh): the suite depends on a devicetree only
+# this board has, so on any other target Twister filters it rather than
+# failing it.
+#
+# There is deliberately no `build_only: true`. Twister already refuses to
+# execute a scenario on a hardware platform unless a device is attached, so
+# `twister -p nucleo_h723zg` builds the image and stops, while
+# `twister -p nucleo_h723zg --device-testing --hardware-map <map>` flashes it
+# and reads the ztest summary back over the console. Setting build_only would
+# take the second half away.
+tests:
+  audio.board.nucleo_h723zg.i2s_smoke:
+    tags:
+      - audio
+      - board
+      - i2s
+    platform_allow:
+      - nucleo_h723zg
+    integration_platforms:
+      - nucleo_h723zg

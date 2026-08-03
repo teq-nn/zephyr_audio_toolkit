@@ -20,10 +20,24 @@ manifest:
       remote: zephyrproject-rtos
       revision: v4.4.1
       import:
-        # Only clone the modules this module actually needs. The default
-        # test target (native_sim) needs no HAL; picolibc is kept so the
-        # C library choice does not depend on what the toolchain ships.
-        # Add entries here when tests start covering another board
-        # (e.g. cmsis_6 + hal_nordic for the nRF53 audio targets).
+        # Only clone the modules this module actually needs: the allowlist
+        # exists to keep CI clones small, so nothing speculative belongs in
+        # it. Add an entry when a test target starts demanding it, not
+        # before.
+        #
+        #   picolibc  the default native_sim target needs no HAL; picolibc is
+        #             kept so the C library choice does not depend on what
+        #             the toolchain happens to ship.
+        #   hal_stm32 the STM32 LL/HAL sources and, just as importantly, the
+        #             SoC and pinctrl devicetree fragments under dts/st/ that
+        #             nucleo_h723zg.dts includes.
+        #   cmsis_6   CMSIS-Core for Cortex-M. In Zephyr v4.4.1 the older
+        #             `cmsis` project only builds for Cortex-A/R
+        #             (modules/cmsis/CMakeLists.txt guards on
+        #             CPU_AARCH32_CORTEX_A/R), while modules/cmsis_6 is what
+        #             CPU_CORTEX_M selects - so the STM32H7 target wants
+        #             cmsis_6, not cmsis.
         name-allowlist:
           - picolibc
+          - hal_stm32
+          - cmsis_6
