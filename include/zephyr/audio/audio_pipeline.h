@@ -28,6 +28,12 @@
  * place to look for the format a run is using (spec §5.2/§8.1).
  */
 struct audio_pipeline_config {
+	/* Frame size in TOTAL interleaved samples across all channels, never
+	 * per channel (issue #23). The channel count is not part of this struct
+	 * - it arrives with audio_pipeline_set_format() - so a per-channel
+	 * figure could not be turned into a buffer size here at all. At 2
+	 * channels, 128 means 64 sample pairs.
+	 */
 	uint16_t frame_samples;
 	audio_pipeline_event_callback_t event_cb;
 	void *event_user_data;
@@ -80,7 +86,13 @@ struct audio_pipeline {
 	size_t stack_size;
 	int priority;
 
-	/* Shared frame buffer handed down the chain, sized in samples. */
+	/* Shared frame buffer handed down the chain, sized in TOTAL interleaved
+	 * samples across all channels (never per channel): @p frame_capacity is
+	 * the number of int32_t the chain may use, whatever the bound format's
+	 * channel count. A stereo run therefore sees frame_capacity / 2 sample
+	 * pairs, which is why audio_pipeline_set_format() refuses a format with
+	 * more channels than this buffer holds sample sets for.
+	 */
 	int32_t *frame_buf;
 	size_t frame_capacity;
 
@@ -147,7 +159,9 @@ struct audio_pipeline {
  *
  *  - the @ref audio_pipeline object (including its @c k_thread and @c k_msgq),
  *  - a dedicated worker thread stack of @p _stack_size bytes,
- *  - a dedicated frame buffer of @p _frame_samples @c int32_t samples,
+ *  - a dedicated frame buffer of exactly @p _frame_samples @c int32_t samples
+ *    - @p _frame_samples is the *total* across all channels, so there is
+ *    deliberately no channel multiplier in the allocation below (issue #23),
  *  - dedicated event queue storage for
  *    ::AUDIO_PIPELINE_EVENT_QUEUE_DEPTH events,
  *
@@ -161,12 +175,19 @@ struct audio_pipeline {
  * @p _frame_samples, because init() clamps the frame capacity to the smaller
  * of the two.
  *
+ * Interleaving is the caller's arithmetic, not the macro's: a stereo pipeline
+ * defined with @p _frame_samples 128 runs on 64 sample pairs, and the format it
+ * is later bound to must not have more channels than the buffer has samples -
+ * audio_pipeline_set_format() refuses that rather than handing the chain a
+ * frame no sample set fits into.
+ *
  * The pipeline object itself is not static, so an instance defined in one file
  * can be reached from another through AUDIO_PIPELINE_DECLARE(); its stack and
  * frame buffer are private to the defining file.
  *
  * @param _name          Symbol name of the @ref audio_pipeline instance.
- * @param _frame_samples Frame buffer size in samples.
+ * @param _frame_samples Frame buffer size in total interleaved samples across
+ *                       all channels (not per channel).
  * @param _stack_size    Worker thread stack size in bytes.
  * @param _priority      Worker thread priority.
  */
@@ -175,8 +196,10 @@ struct audio_pipeline {
 	static int32_t _name##_frame_buf[_frame_samples];                                  \
 	static struct audio_pipeline_event                                                 \
 		_name##_event_slots[AUDIO_PIPELINE_EVENT_QUEUE_DEPTH];                     \
-	BUILD_ASSERT(ARRAY_SIZE(_name##_frame_buf) > 0,                                    \
-		     "AUDIO_PIPELINE_DEFINE(" #_name "): frame_samples must be positive"); \
+	BUILD_ASSERT(ARRAY_SIZE(_name##_frame_buf) >= 2,                                   \
+		     "AUDIO_PIPELINE_DEFINE(" #_name "): frame_samples is the TOTAL "      \
+		     "interleaved sample count and must hold at least one stereo "         \
+		     "sample set (>= 2), like CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES");       \
 	struct audio_pipeline _name = {                                                    \
 		.stack = _name##_stack,                                                    \
 		.stack_size = K_THREAD_STACK_SIZEOF(_name##_stack),                        \
@@ -242,13 +265,21 @@ int audio_pipeline_init(struct audio_pipeline *pipeline,
  * (spec §3.3). The worker thread never reads the bound format, which is why
  * this needs no lock.
  *
+ * This is also where the frame size and the channel count first meet:
+ * @c frame_samples counts total interleaved samples, so a format is refused if
+ * its @c channels exceed the instance's frame capacity - such a frame could not
+ * carry a single interleaved sample set. The Kconfig range covers the channel
+ * counts the shipped nodes accept at compile time; this covers the rest, since
+ * only here is the channel count known.
+ *
  * @param pipeline Initialised pipeline instance.
  * @param fmt      Format to copy in; @c sample_rate_hz and @c channels must be
- *                 non-zero.
+ *                 non-zero, and @c channels must not exceed the frame capacity.
  *
  * @retval 0 on success
- * @retval -EINVAL on a NULL argument, on a pipeline that is not initialised, or
- *         on a format no node could satisfy
+ * @retval -EINVAL on a NULL argument, on a pipeline that is not initialised, on
+ *         a format no node could satisfy, or on more channels than one frame
+ *         can hold one interleaved sample set of
  * @retval -EBUSY while the node chain is open, whether the pipeline is playing
  *         or merely idle
  */

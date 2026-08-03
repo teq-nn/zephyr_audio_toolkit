@@ -14,6 +14,7 @@ target_sources(app PRIVATE
 	test_roundtrip.c
 	test_error_paths.c
 	test_static_define.c
+	test_frame_sizing.c
 	test_events.c
 	test_file_reader.c
 	test_file_writer.c
