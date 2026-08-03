@@ -40,6 +40,55 @@ config AK4619_PROBE_TIMEOUT_MS
 	  board fails with a message instead of hanging. Set 0 for a single
 	  attempt.
 
+comment "Levels audio_codec_configure() programs"
+
+config AK4619_DAC_VOLUME_HALF_DB
+	int "DAC digital volume, in half-decibels"
+	default -12
+	range -230 24
+	help
+	  Digital volume written to DAC1 and DAC2, both channels, in 0.5 dB
+	  steps: -12 is -6.0 dB, 0 is 0.0 dB, 24 is the part's +12.0 dB
+	  maximum (datasheet p.51, Table 22).
+
+	  The default of -6.0 dB is the loop cable's only attenuation, and it
+	  is not arbitrary. The DAC's full-scale output and the ADC's
+	  single-ended full-scale input are the same number and track the same
+	  rail - 2.55/2.83/3.11 Vpp min/typ/max, both 0.858 x AVDD (datasheet
+	  p.11 note *14, p.12 note *15) - so a 0 dBFS tone out of the DAC lands
+	  exactly at ADC full scale, with part-to-part spread the only margin.
+	  Worst case that spread is 1.7 dB the wrong way. 6 dB clears it and
+	  still leaves the captured tone ~94 dB above the ADC's noise floor.
+
+	  Changing this changes the level issue #47 measures at the ADC. Record
+	  the new pair in docs/hardware/akd4619-evaluation-board.md.
+
+config AK4619_ADC_VOLUME_HALF_DB
+	int "ADC digital volume, in half-decibels"
+	default 0
+	range -206 48
+	help
+	  Digital volume written to both channels of both ADCs, in 0.5 dB
+	  steps from 0 = 0.0 dB (datasheet p.46, Table 14). The default leaves
+	  the capture path unity so that what issue #47 measures is the analog
+	  loop and not a gain the driver added.
+
+config AK4619_MIC_GAIN_DB
+	int "MIC Gain AMP gain, in dB"
+	default 0
+	range -6 27
+	help
+	  Gain of the analog amplifier every ADC input passes through
+	  (datasheet p.43, Figure 23), in 3 dB steps from -6 to +27 (p.42,
+	  Table 9). Must be a multiple of 3; the driver asserts that at build
+	  time.
+
+	  0 dB makes it a line input: 2.83 Vpp typ full scale, 25 k input
+	  impedance (datasheet p.11), which is what the loop cable carries.
+	  Every dB added here is a dB of headroom removed from the loop, and a
+	  line-level signal into a stage left near +27 dB clips before the
+	  converter ever sees a clean sample.
+
 module = AK4619
 module-str = AK4619 audio codec
 source "subsys/logging/Kconfig.template.log_config"

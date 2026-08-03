@@ -32,7 +32,8 @@ disagrees with this document, the board wins; record the disagreement here.
 | Digital audio path | `PORT401` (INOUT-PORT), 14-pin header | manual p.25, Tables 17/18 |
 | Optical/coax path | not used | issue #43 |
 | DAC out → ADC in loop | `J210` → `J201` (+ `J202` for a stereo loop) | manual p.4, p.66 |
-| Attenuation in the loop cable | none needed; drive the DAC at ≤ −3 dBFS | datasheet pp.11–12 |
+| Attenuation in the loop cable | none needed; the codec supplies it — §4.5 | datasheet pp.11–12 |
+| **Loop gain pair** | **DAC digital volume −6.0 dB, MIC Gain AMP 0 dB** | §4.5 (#46) |
 | Board power | +5.0 V into `J703` (REG); all rail jumpers at their defaults | manual pp.6–8, p.37 |
 
 ## 1. Control mode
@@ -289,6 +290,7 @@ p.10), **default `2h` = 0 dB** (datasheet p.42, Table 9; register 04h/05h reset
 value `22h`, p.60). At 0 dB the input is a line-level input:
 full scale 2.83 Vpp typ, input impedance 25 kΩ typ (datasheet p.11). #46 must
 leave the MIC gain at 0 dB; every dB added there costs a dB of loop headroom.
+It does — see §4.5.
 
 ### 4.3 Input jumpers
 
@@ -346,6 +348,39 @@ at both ends (`C209`–`C212` out, `C201`–`C208` in) (manual p.66
 0.1 dB, and the two capacitors put the high-pass corner near 13 Hz — the manual
 notes the same effect on its own low-frequency plots (p.62). A 1 kHz test tone
 is unaffected.
+
+### 4.5 The gain pair the loop runs at
+
+Settled by #46 and programmed by the driver at `audio_codec_configure()` time.
+#47's level thresholds depend on these three numbers, so change them here and
+in the Kconfig defaults together, or not at all.
+
+| Stage | Register | Setting | Kconfig |
+| --- | --- | --- | --- |
+| DAC1 digital volume, both channels | `0x0E`, `0x0F` = `0x24` | **−6.0 dB** | `AK4619_DAC_VOLUME_HALF_DB` = −12 |
+| MIC Gain AMP, ADC1 both channels | `0x04` = `0x22` | **0 dB** | `AK4619_MIC_GAIN_DB` = 0 |
+| ADC1 digital volume, both channels | `0x06`, `0x07` = `0x30` | **0.0 dB** | `AK4619_ADC_VOLUME_HALF_DB` = 0 |
+
+**Why −6 dB and not −3.** §4.4 says a 0 dBFS tone lands exactly at ADC full
+scale, so the loop has no headroom of its own and needs some given to it. The
+DAC's and the ADC's full-scale specs are both 2.55/2.83/3.11 Vpp min/typ/max
+(datasheet p.11 note \*14, p.12 note \*15), so the worst pairing — a DAC at its
+3.11 V maximum into an ADC at its 2.55 V minimum — is 1.7 dB the wrong way.
+3 dB covers that with almost nothing left; 6 dB covers it, plus the ~0.1 dB the
+220 Ω series resistors cost, plus a cable, and still leaves the captured tone
+about 94 dB above the ADC's noise floor (S/N 100 dB typ, p.11).
+
+**What it means for a measurement.** With the analog and digital capture gains
+at unity, a full-scale digital tone written to the I2S TX block comes back from
+the ADC at **−6 dBFS**, i.e. half amplitude, ±the two full-scale tolerances.
+The application does not need to attenuate its own tone; if it does, the two
+attenuations add.
+
+**Attenuating in the codec rather than in the tone.** Either would work. Doing
+it in the DAC volume register means the level is a property of the board
+configuration rather than of whatever signal happens to be playing, so an
+oscilloscope on `J210` sees the same −6 dBFS whatever #47 sends, and a change
+to the tone generator cannot silently overdrive the ADC.
 
 ## 5. Power and ground
 

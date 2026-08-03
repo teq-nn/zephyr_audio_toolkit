@@ -11,8 +11,11 @@
 sample:
   name: AK4619 codec bring-up
   description: >
-    Reset an AKM AK4619 over I2C and prove on the console that it is answering,
-    rather than that the bus ACKed into the void.
+    Reset an AKM AK4619 over I2C, prove on the console that it is answering
+    rather than that the bus ACKed into the void, then program the audio
+    interface, the clock mode and the analog paths and read every one of those
+    registers back - register 0x12 included, which is where an internal
+    loopback would hide.
 tests:
   sample.audio.ak4619_loopback:
     build_only: true
