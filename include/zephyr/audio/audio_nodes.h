@@ -6,6 +6,13 @@
  * never passes buffer pointers and two instances of the same node type can
  * never share state.
  *
+ * Each node is a Kconfig symbol of its own (CONFIG_AUDIO_PIPELINE_NODE_*) and
+ * only the enabled ones are compiled, so everything a node owns - its state
+ * type, its ops object and its *_NODE_DEFINE() macro - is declared here under
+ * the matching guard. Using the macro of a node that was not built is a
+ * configuration mistake, and this header reports it as one: see
+ * AUDIO_NODE_UNAVAILABLE() below.
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,20 +20,50 @@
 #define ZEPHYR_AUDIO_NODES_H_
 
 #include <stdbool.h>
-#include <zephyr/fs/fs.h>
+#include <zephyr/toolchain.h>
 #include <zephyr/types.h>
 
 #include <zephyr/audio/audio_format.h>
 #include <zephyr/audio/audio_node.h>
 
-/** @brief Q15 unity gain: sample * AUDIO_GAIN_UNITY_Q15 >> 15 == sample. */
-#define AUDIO_GAIN_UNITY_Q15 32768
+#if defined(CONFIG_AUDIO_PIPELINE_NODE_FILE_READER) || \
+	defined(CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER)
+#include <zephyr/fs/fs.h>
+#endif
 
-/** @brief Per-instance state of the gain filter node. */
-struct audio_gain_filter_state {
-	/** Gain in Q15; 0 is treated as unity gain by open(). */
-	int32_t gain_q15;
-};
+/**
+ * @brief Stand in for the *_NODE_DEFINE() of a node that was not built.
+ *
+ * A disabled node has no ops object, so its macro cannot expand to a working
+ * definition. Leaving the macro undefined would report the mistake as an
+ * implicit-declaration warning, and expanding it to nothing would report it at
+ * link time naming a mangled state symbol - neither says which Kconfig symbol
+ * turns the node back on.
+ *
+ * This expands to a placeholder node with no ops - so the rest of the
+ * translation unit still compiles and the build reports one error rather than a
+ * cascade - followed by a failing BUILD_ASSERT that names the macro and that
+ * symbol. The placeholder is never reachable: the assertion fails first.
+ *
+ * @param _name   Symbol name the caller asked for.
+ * @param _role   Role the node would have had (::audio_node_role).
+ * @param _macro  Name of the macro that was used, as a string literal.
+ * @param _symbol Kconfig symbol that builds the node, without the CONFIG_
+ *                prefix, as a string literal.
+ */
+#define AUDIO_NODE_UNAVAILABLE(_name, _role, _macro, _symbol)                    \
+	struct audio_node _name = {                                              \
+		.role = (_role),                                                 \
+	};                                                                       \
+	BUILD_ASSERT(0, _macro "() needs the node it defines: set CONFIG_"       \
+			_symbol "=y")
+
+/* -------------------------------------------------------------------------
+ * File reader source node
+ * -------------------------------------------------------------------------
+ */
+
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_FILE_READER
 
 /** @brief Per-instance state of the file reader source node. */
 struct audio_file_reader_state {
@@ -58,6 +95,38 @@ struct audio_file_reader_state {
 	bool file_open;
 };
 
+extern const struct audio_node_ops file_reader_node_ops;
+
+/**
+ * @brief Statically define a file reader source node.
+ *
+ * File scope only. Allocates the node and its ::audio_file_reader_state.
+ * Needs @kconfig{CONFIG_AUDIO_PIPELINE_NODE_FILE_READER}.
+ *
+ * @param _name Symbol name of the @ref audio_node instance.
+ * @param _path Path of the file the source reads from.
+ */
+#define AUDIO_FILE_READER_NODE_DEFINE(_name, _path)                                   \
+	static struct audio_file_reader_state _name##_state = {                       \
+		.path = (_path),                                                      \
+	};                                                                            \
+	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &file_reader_node_ops, NULL, \
+			  &_name##_state)
+
+#else /* CONFIG_AUDIO_PIPELINE_NODE_FILE_READER */
+
+#define AUDIO_FILE_READER_NODE_DEFINE(_name, _path)                          \
+	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_SOURCE,                \
+			       "AUDIO_FILE_READER_NODE_DEFINE",              \
+			       "AUDIO_PIPELINE_NODE_FILE_READER")
+
+#endif /* CONFIG_AUDIO_PIPELINE_NODE_FILE_READER */
+
+/* -------------------------------------------------------------------------
+ * File writer sink node
+ * -------------------------------------------------------------------------
+ */
+
 /**
  * @brief Samples the file writer narrows per filesystem write.
  *
@@ -65,6 +134,8 @@ struct audio_file_reader_state {
  * this is written in several chunks, so it does not cap the frame size.
  */
 #define AUDIO_FILE_WRITER_CHUNK_SAMPLES 64U
+
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER
 
 /** @brief Per-instance state of the file writer sink node. */
 struct audio_file_writer_state {
@@ -103,46 +174,13 @@ struct audio_file_writer_state {
 	uint8_t chunk[AUDIO_FILE_WRITER_CHUNK_SAMPLES * sizeof(int16_t)];
 };
 
-extern const struct audio_node_ops file_reader_node_ops;
 extern const struct audio_node_ops file_writer_node_ops;
-extern const struct audio_node_ops gain_filter_node_ops;
-extern const struct audio_node_ops null_sink_node_ops;
-
-/**
- * @brief Statically define a file reader source node.
- *
- * File scope only. Allocates the node and its ::audio_file_reader_state.
- *
- * @param _name Symbol name of the @ref audio_node instance.
- * @param _path Path of the file the source reads from.
- */
-#define AUDIO_FILE_READER_NODE_DEFINE(_name, _path)                                   \
-	static struct audio_file_reader_state _name##_state = {                       \
-		.path = (_path),                                                      \
-	};                                                                            \
-	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &file_reader_node_ops, NULL, \
-			  &_name##_state)
-
-/**
- * @brief Statically define a gain filter node.
- *
- * File scope only. Allocates the node and its ::audio_gain_filter_state.
- *
- * @param _name     Symbol name of the @ref audio_node instance.
- * @param _upstream Pointer to the upstream node.
- * @param _gain_q15 Gain in Q15 (::AUDIO_GAIN_UNITY_Q15 is 1.0).
- */
-#define AUDIO_GAIN_FILTER_NODE_DEFINE(_name, _upstream, _gain_q15)                           \
-	static struct audio_gain_filter_state _name##_state = {                              \
-		.gain_q15 = (_gain_q15),                                                     \
-	};                                                                                   \
-	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_FILTER, &gain_filter_node_ops, (_upstream), \
-			  &_name##_state)
 
 /**
  * @brief Statically define a file writer sink node.
  *
  * File scope only. Allocates the node and its ::audio_file_writer_state.
+ * Needs @kconfig{CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER}.
  *
  * @param _name     Symbol name of the @ref audio_node instance.
  * @param _upstream Pointer to the upstream node.
@@ -155,15 +193,87 @@ extern const struct audio_node_ops null_sink_node_ops;
 	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SINK, &file_writer_node_ops, (_upstream), \
 			  &_name##_state)
 
+#else /* CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER */
+
+#define AUDIO_FILE_WRITER_NODE_DEFINE(_name, _upstream, _path)               \
+	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_SINK,                  \
+			       "AUDIO_FILE_WRITER_NODE_DEFINE",              \
+			       "AUDIO_PIPELINE_NODE_FILE_WRITER")
+
+#endif /* CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER */
+
+/* -------------------------------------------------------------------------
+ * Gain filter node
+ * -------------------------------------------------------------------------
+ */
+
+/** @brief Q15 unity gain: sample * AUDIO_GAIN_UNITY_Q15 >> 15 == sample. */
+#define AUDIO_GAIN_UNITY_Q15 32768
+
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER
+
+/** @brief Per-instance state of the gain filter node. */
+struct audio_gain_filter_state {
+	/** Gain in Q15; 0 is treated as unity gain by open(). */
+	int32_t gain_q15;
+};
+
+extern const struct audio_node_ops gain_filter_node_ops;
+
+/**
+ * @brief Statically define a gain filter node.
+ *
+ * File scope only. Allocates the node and its ::audio_gain_filter_state.
+ * Needs @kconfig{CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER}.
+ *
+ * @param _name     Symbol name of the @ref audio_node instance.
+ * @param _upstream Pointer to the upstream node.
+ * @param _gain_q15 Gain in Q15 (::AUDIO_GAIN_UNITY_Q15 is 1.0).
+ */
+#define AUDIO_GAIN_FILTER_NODE_DEFINE(_name, _upstream, _gain_q15)                           \
+	static struct audio_gain_filter_state _name##_state = {                              \
+		.gain_q15 = (_gain_q15),                                                     \
+	};                                                                                   \
+	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_FILTER, &gain_filter_node_ops, (_upstream), \
+			  &_name##_state)
+
+#else /* CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER */
+
+#define AUDIO_GAIN_FILTER_NODE_DEFINE(_name, _upstream, _gain_q15)           \
+	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_FILTER,                \
+			       "AUDIO_GAIN_FILTER_NODE_DEFINE",              \
+			       "AUDIO_PIPELINE_NODE_GAIN_FILTER")
+
+#endif /* CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER */
+
+/* -------------------------------------------------------------------------
+ * Null sink node
+ * -------------------------------------------------------------------------
+ */
+
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK
+
+extern const struct audio_node_ops null_sink_node_ops;
+
 /**
  * @brief Statically define a null sink node.
  *
  * File scope only. The node discards every frame and keeps no state.
+ * Needs @kconfig{CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK}.
  *
  * @param _name     Symbol name of the @ref audio_node instance.
  * @param _upstream Pointer to the upstream node.
  */
 #define AUDIO_NULL_SINK_NODE_DEFINE(_name, _upstream) \
 	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SINK, &null_sink_node_ops, (_upstream), NULL)
+
+#else /* CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK */
+
+#define AUDIO_NULL_SINK_NODE_DEFINE(_name, _upstream)                        \
+	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_SINK,                  \
+			       "AUDIO_NULL_SINK_NODE_DEFINE",                \
+			       "AUDIO_PIPELINE_NODE_NULL_SINK")
+
+#endif /* CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK */
 
 #endif /* ZEPHYR_AUDIO_NODES_H_ */

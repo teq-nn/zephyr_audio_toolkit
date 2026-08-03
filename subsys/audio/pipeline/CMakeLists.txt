@@ -8,8 +8,11 @@ zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE
 	audio_pipeline_events.c
 	audio_node_core.c
 	audio_wav.c
-	nodes/file_reader_node.c
-	nodes/file_writer_node.c
-	nodes/gain_filter_node.c
-	nodes/null_sink_node.c
 )
+
+# One symbol per shipped node, so a node nobody defines contributes no text.
+# The list grows with the nodes; keep it one line per node.
+zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE_NODE_FILE_READER nodes/file_reader_node.c)
+zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER nodes/file_writer_node.c)
+zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER nodes/gain_filter_node.c)
+zephyr_library_sources_ifdef(CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK nodes/null_sink_node.c)

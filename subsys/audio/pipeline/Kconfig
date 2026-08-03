@@ -1,23 +1,106 @@
 menuconfig AUDIO_PIPELINE
 	bool "Zephyr audio pipeline"
-	select FILE_SYSTEM
 	help
-	  Enable the pull-based audio pipeline subsystem and helper nodes.
+	  Enable the pull-based audio pipeline subsystem.
 
-	  The file reader source and the file writer sink shipped with the
-	  subsystem talk to the Zephyr filesystem API, so FILE_SYSTEM is
-	  selected unconditionally. That only pulls in the dispatch layer -
-	  the application still chooses a filesystem type (ext2, FAT,
-	  littlefs, ...) and mounts it before opening the pipeline.
+	  This symbol brings in the pipeline core only - the thread, the frame
+	  buffer, the event queue and the node dispatch. The nodes shipped with
+	  the subsystem are separate symbols under "Nodes" below, so an image
+	  carries the ones the application wires up with a *_NODE_DEFINE() macro
+	  and nothing else. In particular FILE_SYSTEM is selected by the two file
+	  nodes that actually talk to it, not by the pipeline: a target with no
+	  storage - the first hardware targets of this module have none - would
+	  otherwise pay for a filesystem dispatch layer it can never use.
 
 if AUDIO_PIPELINE
 
-config AUDIO_PIPELINE_FRAME_SAMPLES
-	int "Samples per frame"
-	default 128
-	range 1 1024
+menu "Nodes"
+
+config AUDIO_PIPELINE_NODE_FILE_READER
+	bool "File reader source node"
+	select FILE_SYSTEM
 	help
-	  Frame size processed by the pipeline thread in one iteration.
+	  Source node that reads a RIFF/WAVE file through the Zephyr filesystem
+	  API. That API is why this symbol, and not AUDIO_PIPELINE, selects
+	  FILE_SYSTEM. The select only pulls in the dispatch layer: the
+	  application still chooses a filesystem type (ext2, FAT, littlefs, ...)
+	  and mounts it before opening the pipeline.
+
+	  Defaults to n like every node symbol here. A node is only reachable
+	  through its *_NODE_DEFINE() macro, so an application always knows
+	  which nodes it uses and can say so; the reverse - a default the
+	  application never asked for - is text nobody can point at. For this
+	  node it is also a whole subsystem nobody asked for.
+
+config AUDIO_PIPELINE_NODE_FILE_WRITER
+	bool "File writer sink node"
+	select FILE_SYSTEM
+	help
+	  Sink node that writes the stream to a RIFF/WAVE file through the
+	  Zephyr filesystem API. As with the reader, the select lives here
+	  rather than on AUDIO_PIPELINE because this node is one of the two that
+	  need it, and it only pulls in the dispatch layer - the application
+	  mounts a filesystem itself.
+
+	  Defaults to n for the same reason as the reader: nodes are opted into
+	  explicitly, so the set of nodes in an image is visible in prj.conf.
+
+config AUDIO_PIPELINE_NODE_GAIN_FILTER
+	bool "Gain filter node"
+	help
+	  Filter node that scales every sample by a Q15 gain. Pure arithmetic,
+	  no dependencies.
+
+	  Defaults to n so that the node set is opted into explicitly, like
+	  every other node symbol here, rather than being cheap enough that
+	  nobody notices it. Uniformity is the point: one rule for all four
+	  shipped nodes is easier to reason about than a size threshold.
+
+config AUDIO_PIPELINE_NODE_NULL_SINK
+	bool "Null sink node"
+	help
+	  Sink node that discards every frame it is handed. Useful to terminate
+	  a chain while bringing a source or a filter up, and it keeps no state.
+
+	  Defaults to n so that the node set is opted into explicitly, like
+	  every other node symbol here.
+
+endmenu
+
+config AUDIO_PIPELINE_FRAME_SAMPLES
+	int "Samples per frame (total across all channels)"
+	default 128
+	range 2 1024
+	help
+	  Size of the shared pipeline frame buffer, counted in TOTAL int32_t
+	  samples across all channels - not per channel. Samples are
+	  interleaved, so at 2 channels a value of 128 carries 64 sample pairs,
+	  and AUDIO_PIPELINE_DEFINE() allocates exactly this many int32_t with
+	  no channel multiplier anywhere.
+
+	  Total rather than per channel because the channel count is not known
+	  here: it is bound at run time by audio_pipeline_set_format() and owned
+	  by the pipeline (manifest §4), so a per-channel figure could not be
+	  turned into a buffer size at compile time without a second, static
+	  channel-count symbol to disagree with the bound format.
+
+	  Latency per iteration is therefore
+	  frame_samples / (sample_rate_hz * channels): 128 total samples at
+	  48 kHz stereo is 64 frames, i.e. ~1.33 ms.
+
+	  Default 128 (512 bytes) is kept from the shipped behaviour: it is a
+	  comfortable ~1.3 ms of stereo at 48 kHz and it stays a power of two
+	  for every channel count in the v1 range. The upper bound of 1024
+	  caps the static buffer at 4 KiB.
+
+	  The minimum is 2, not 1: a total frame of 1 sample cannot hold one
+	  interleaved sample set for the 2 channels the shipped file nodes
+	  accept (their v1 range is 1..2), so it is a value no stereo pipeline
+	  could ever use. 2 is the smallest frame that holds one full
+	  interleaved sample set for every format those nodes can bind. Node
+	  sets with more channels are covered at run time instead, where the
+	  channel count is known: audio_pipeline_set_format() refuses a format
+	  whose one interleaved sample set does not fit the frame buffer.
 
 config AUDIO_PIPELINE_EVENT_QUEUE_DEPTH
 	int "Event queue depth per pipeline"

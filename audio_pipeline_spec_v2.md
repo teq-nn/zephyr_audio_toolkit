@@ -453,10 +453,16 @@ The macro:
 - creates `K_THREAD_STACK_DEFINE` for the pipeline thread,
 - creates a static frame buffer:
   ```c
-  static int32_t my_pipeline_frame_buf[CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES * 2];
+  static int32_t my_pipeline_frame_buf[CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES];
   ```
-  (2 = channels),
+  with **no channel multiplier**: `frame_samples` is the total interleaved sample count across all
+  channels, so a stereo run gets `frame_samples / 2` sample pairs out of this buffer (manifest §5,
+  issue #23). The channel count is bound at run time and is not knowable here,
 - ties these to the pipeline struct.
+
+`audio_pipeline_set_format()` refuses a format whose `channels` exceed the frame capacity: such a
+frame cannot hold one interleaved sample set, and the Kconfig range can only enforce that floor for
+the channel counts the shipped nodes accept.
 
 ---
 
@@ -469,9 +475,9 @@ config AUDIO_PIPELINE
     bool "Audio processing pipeline framework"
 
 config AUDIO_PIPELINE_FRAME_SAMPLES
-    int "Samples per frame (per channel)"
-    default 64
-    range 8 1024
+    int "Samples per frame (total across all channels)"
+    default 128
+    range 2 1024
 
 config AUDIO_PIPELINE_THREAD_STACK_SIZE
     int "Stack size for pipeline worker thread"
@@ -486,6 +492,44 @@ config AUDIO_PIPELINE_EVENT_QUEUE_DEPTH
     default 4
     range 1 32
 ```
+
+`AUDIO_PIPELINE_FRAME_SAMPLES` is a **total** interleaved sample count (manifest §5). Default 128
+(512 bytes) is ~1.33 ms of stereo at 48 kHz and stays a power of two for every channel count in the
+v1 range; the maximum of 1024 caps the static buffer at 4 KiB. The minimum is 2 rather than 1
+because a one-sample frame cannot hold a single stereo sample set, and the shipped file nodes accept
+up to 2 channels. Wider node sets are covered at run time by `audio_pipeline_set_format()`, which is
+the first point where the channel count is known.
+
+### 7.1 Node selection
+
+Every node the subsystem ships is a symbol of its own, and only the enabled ones are compiled:
+
+```kconfig
+config AUDIO_PIPELINE_NODE_FILE_READER
+    bool "File reader source node"
+    select FILE_SYSTEM
+
+config AUDIO_PIPELINE_NODE_FILE_WRITER
+    bool "File writer sink node"
+    select FILE_SYSTEM
+
+config AUDIO_PIPELINE_NODE_GAIN_FILTER
+    bool "Gain filter node"
+
+config AUDIO_PIPELINE_NODE_NULL_SINK
+    bool "Null sink node"
+```
+
+- All four default to `n`. A node is only reachable through its `*_NODE_DEFINE()` macro, so an
+  application always knows which nodes it uses and says so in `prj.conf`; the module ships lean and
+  a target with no storage pays for no filesystem.
+- A node's dependencies belong to the node's symbol. `FILE_SYSTEM` is selected by the two file
+  nodes, never by `AUDIO_PIPELINE`.
+- Each symbol gates the node's source file, its state type, its `<role>_node_ops` extern and its
+  `*_NODE_DEFINE()` macro. Using the macro of a node that was not built expands to a placeholder
+  node plus a failing `BUILD_ASSERT` naming the macro and the Kconfig symbol that builds it, so the
+  diagnostic arrives at the definition site instead of as an unresolved mangled symbol at link
+  time.
 
 ---
 

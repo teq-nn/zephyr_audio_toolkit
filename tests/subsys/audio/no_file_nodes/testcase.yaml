@@ -1,0 +1,8 @@
+tests:
+  audio.pipeline.no_file_nodes:
+    tags:
+      - audio
+      - audio_pipeline
+      - kconfig
+    integration_platforms:
+      - native_sim

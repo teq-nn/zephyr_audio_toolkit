@@ -112,8 +112,10 @@ struct audio_stream_config {
 
 ## 5. Frames, buffers, and static definition (manifest §5/§6/§9, spec §6)
 
-- Frame size comes from `CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES` (per channel) and governs latency and
-  per-cycle workload. One `process()` call per node per frame.
+- Frame size comes from `CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES` — **total** interleaved samples across
+  all channels, never per channel (manifest §5). It governs latency
+  (`frame_samples / (sample_rate_hz * channels)`) and per-cycle workload. One `process()` call per
+  node per frame. `set_format()` refuses a format with more channels than the frame has samples.
 - The pipeline owns one static shared frame buffer; nodes may hold their own static scratch buffers.
 - `AUDIO_PIPELINE_DEFINE()` instantiates the pipeline struct, its thread stack
   (`K_THREAD_STACK_DEFINE`), the frame buffer, and the event slots — all per instance, so two
@@ -169,9 +171,18 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 | Symbol | Meaning |
 | --- | --- |
 | `CONFIG_AUDIO_PIPELINE` | Enable the subsystem. |
-| `CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES` | Samples per frame, per channel. |
+| `CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES` | Samples per frame, total across all channels (default 128, range 2–1024). |
 | `CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE` | Worker thread stack size. |
 | `CONFIG_AUDIO_PIPELINE_THREAD_PRIO` | Worker thread priority. |
+| `CONFIG_AUDIO_PIPELINE_NODE_FILE_READER` | Build the file reader source; selects `FILE_SYSTEM`. |
+| `CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER` | Build the file writer sink; selects `FILE_SYSTEM`. |
+| `CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER` | Build the gain filter. |
+| `CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK` | Build the null sink. |
+
+- **Node symbols all default to `n`** and each one gates its node's source file, its state type and
+  its `*_NODE_DEFINE()` macro. Enabling `AUDIO_PIPELINE` alone gives a pipeline with no nodes; an
+  application adds one line per node it defines. Using the macro of a node that was not built is a
+  build error naming the missing symbol, not a link error.
 
 ## 9. Tests (spec §12)
 

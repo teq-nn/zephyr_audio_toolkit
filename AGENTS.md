@@ -14,6 +14,7 @@ This repository is an out-of-tree Zephyr module. The tree follows manifest §12 
 - `subsys/audio/pipeline/` holds the implementation (`audio_pipeline_core.c`, `audio_pipeline_config.c`, `audio_pipeline_events.c`, `audio_node_core.c`, `audio_wav.c`, private `audio_internal.h`), with node implementations under `nodes/`.
 - `samples/audio/pipeline_basic/` holds the reference application.
 - `tests/subsys/audio/pipeline/` holds the pipeline Ztest suites and their shared fixture and fake nodes; `tests/subsys/audio/wav/` holds the standalone WAV header suite, which builds without `CONFIG_AUDIO_PIPELINE`.
+- `tests/boards/<board>/` holds board bring-up suites, which assert about hardware rather than about the subsystem and are pinned to their board with `platform_allow` so `native_sim` runs filter them out. `tests/boards/nucleo_h723zg/i2s_smoke/` is the first of these; its `boards/nucleo_h723zg.overlay` is the canonical board overlay for the hardware target and the place the DMA reachability and cache-alignment constraint is recorded (see manifest §6).
 
 New sources belong in `subsys/audio/pipeline/` (and must be added to its `CMakeLists.txt`); new public API belongs in `include/zephyr/audio/`.
 
