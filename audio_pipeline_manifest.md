@@ -150,6 +150,10 @@ It acts as the binding engineering contract for ongoing development.
 ## 9. Memory and API Design
 
 - Nodes are created via `NODE_DEFINE` macros (static allocation).
+- Each shipped node is its own Kconfig symbol (`CONFIG_AUDIO_PIPELINE_NODE_*`, all defaulting to
+  `n`), and only the enabled ones are compiled, so an image carries the nodes the application
+  defines and no others. Dependencies a node needs belong to that node's symbol - the two file
+  nodes are what select `FILE_SYSTEM`, not the pipeline.
 - The pipeline is created via `AUDIO_PIPELINE_DEFINE()` (static thread, buffer, context).
 - The user does **not** need to supply buffer pointers.
 - Everything is fully statically allocated and deterministic.
@@ -235,6 +239,11 @@ zephyr-audio-pipeline/
    │  ├─ test_events.c               # k_msgq event queue
    │  ├─ test_file_reader.c          # WAV source, S16→S32 widening
    │  └─ test_file_writer.c          # WAV sink, S32→S16 truncation
+   ├─ no_file_nodes/             # node selection: file nodes off, FILE_SYSTEM stays out
+   │  ├─ CMakeLists.txt
+   │  ├─ prj.conf
+   │  ├─ testcase.yaml
+   │  └─ test_no_file_nodes.c
    └─ wav/                       # standalone unit test, no CONFIG_AUDIO_PIPELINE
       ├─ CMakeLists.txt
       ├─ prj.conf

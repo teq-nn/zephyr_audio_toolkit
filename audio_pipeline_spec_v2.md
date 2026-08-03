@@ -487,6 +487,36 @@ config AUDIO_PIPELINE_EVENT_QUEUE_DEPTH
     range 1 32
 ```
 
+### 7.1 Node selection
+
+Every node the subsystem ships is a symbol of its own, and only the enabled ones are compiled:
+
+```kconfig
+config AUDIO_PIPELINE_NODE_FILE_READER
+    bool "File reader source node"
+    select FILE_SYSTEM
+
+config AUDIO_PIPELINE_NODE_FILE_WRITER
+    bool "File writer sink node"
+    select FILE_SYSTEM
+
+config AUDIO_PIPELINE_NODE_GAIN_FILTER
+    bool "Gain filter node"
+
+config AUDIO_PIPELINE_NODE_NULL_SINK
+    bool "Null sink node"
+```
+
+- All four default to `n`. A node is only reachable through its `*_NODE_DEFINE()` macro, so an
+  application always knows which nodes it uses and says so in `prj.conf`; the module ships lean and
+  a target with no storage pays for no filesystem.
+- A node's dependencies belong to the node's symbol. `FILE_SYSTEM` is selected by the two file
+  nodes, never by `AUDIO_PIPELINE`.
+- Each symbol gates the node's source file, its state type, its `<role>_node_ops` extern and its
+  `*_NODE_DEFINE()` macro. Using the macro of a node that was not built expands to a failing
+  `BUILD_ASSERT` naming the macro and the Kconfig symbol that builds it, so the diagnostic arrives
+  at the definition site instead of as an unresolved mangled symbol at link time.
+
 ---
 
 ## 8. Pipeline API

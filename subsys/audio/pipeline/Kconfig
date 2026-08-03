@@ -1,16 +1,71 @@
 menuconfig AUDIO_PIPELINE
 	bool "Zephyr audio pipeline"
-	select FILE_SYSTEM
 	help
-	  Enable the pull-based audio pipeline subsystem and helper nodes.
+	  Enable the pull-based audio pipeline subsystem.
 
-	  The file reader source and the file writer sink shipped with the
-	  subsystem talk to the Zephyr filesystem API, so FILE_SYSTEM is
-	  selected unconditionally. That only pulls in the dispatch layer -
-	  the application still chooses a filesystem type (ext2, FAT,
-	  littlefs, ...) and mounts it before opening the pipeline.
+	  This symbol brings in the pipeline core only - the thread, the frame
+	  buffer, the event queue and the node dispatch. The nodes shipped with
+	  the subsystem are separate symbols under "Nodes" below, so an image
+	  carries the ones the application wires up with a *_NODE_DEFINE() macro
+	  and nothing else. In particular FILE_SYSTEM is selected by the two file
+	  nodes that actually talk to it, not by the pipeline: a target with no
+	  storage - the first hardware targets of this module have none - would
+	  otherwise pay for a filesystem dispatch layer it can never use.
 
 if AUDIO_PIPELINE
+
+menu "Nodes"
+
+config AUDIO_PIPELINE_NODE_FILE_READER
+	bool "File reader source node"
+	select FILE_SYSTEM
+	help
+	  Source node that reads a RIFF/WAVE file through the Zephyr filesystem
+	  API. That API is why this symbol, and not AUDIO_PIPELINE, selects
+	  FILE_SYSTEM. The select only pulls in the dispatch layer: the
+	  application still chooses a filesystem type (ext2, FAT, littlefs, ...)
+	  and mounts it before opening the pipeline.
+
+	  Defaults to n like every node symbol here. A node is only reachable
+	  through its *_NODE_DEFINE() macro, so an application always knows
+	  which nodes it uses and can say so; the reverse - a default the
+	  application never asked for - is text nobody can point at. For this
+	  node it is also a whole subsystem nobody asked for.
+
+config AUDIO_PIPELINE_NODE_FILE_WRITER
+	bool "File writer sink node"
+	select FILE_SYSTEM
+	help
+	  Sink node that writes the stream to a RIFF/WAVE file through the
+	  Zephyr filesystem API. As with the reader, the select lives here
+	  rather than on AUDIO_PIPELINE because this node is one of the two that
+	  need it, and it only pulls in the dispatch layer - the application
+	  mounts a filesystem itself.
+
+	  Defaults to n for the same reason as the reader: nodes are opted into
+	  explicitly, so the set of nodes in an image is visible in prj.conf.
+
+config AUDIO_PIPELINE_NODE_GAIN_FILTER
+	bool "Gain filter node"
+	help
+	  Filter node that scales every sample by a Q15 gain. Pure arithmetic,
+	  no dependencies.
+
+	  Defaults to n so that the node set is opted into explicitly, like
+	  every other node symbol here, rather than being cheap enough that
+	  nobody notices it. Uniformity is the point: one rule for all four
+	  shipped nodes is easier to reason about than a size threshold.
+
+config AUDIO_PIPELINE_NODE_NULL_SINK
+	bool "Null sink node"
+	help
+	  Sink node that discards every frame it is handed. Useful to terminate
+	  a chain while bringing a source or a filter up, and it keeps no state.
+
+	  Defaults to n so that the node set is opted into explicitly, like
+	  every other node symbol here.
+
+endmenu
 
 config AUDIO_PIPELINE_FRAME_SAMPLES
 	int "Samples per frame"
