@@ -33,6 +33,11 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
   filter and the null sink are built, and the suite checks that `CONFIG_FILE_SYSTEM` stays out of
   the generated configuration while a pipeline of the remaining nodes still runs.
 - `tests/subsys/audio/wav/` – standalone WAV header unit test (`test_wav.c`), no pipeline needed.
+- `tests/boards/nucleo_h723zg/i2s_smoke/` – board bring-up smoke test: two I2S blocks (i2s2 TX,
+  i2s3 RX, both clock slaves) and the control I2C report ready. Its
+  `boards/nucleo_h723zg.overlay` is the canonical board overlay for the hardware target — the
+  audio pinout, the TX/RX block split and the DMA reachability constraint live there, and hardware
+  work reuses it instead of restating it. Twister filters the suite out of `native_sim` runs.
 
 Headers are installed under the `zephyr/audio/` namespace, so applications include them as
 `#include <zephyr/audio/audio_pipeline.h>`.
@@ -75,7 +80,16 @@ west flash -d build/hw
 
 # Run the test suites headlessly
 west twister -T tests -p native_sim -x=ZEPHYR_EXTRA_MODULES=$PWD
+
+# Board bring-up: build the smoke test for the hardware target...
+west twister -T tests -p nucleo_h723zg
+# ...and run it on an attached board
+west twister -T tests -p nucleo_h723zg --device-testing --hardware-map map.yaml
 ```
+
+`west.yml` pins Zephyr and clones only `picolibc`, `hal_stm32` and `cmsis_6`, which is exactly what
+the `native_sim` and `nucleo_h723zg` targets need. A workspace made with `west init -l` against this
+repository builds both without anything added by hand.
 
 If the module is registered in the west manifest, the `-DZEPHYR_EXTRA_MODULES` / `-x` arguments can
 be dropped. Swap `-p native_sim` for `-p <BOARD>` when coverage must include driver-backed sinks.

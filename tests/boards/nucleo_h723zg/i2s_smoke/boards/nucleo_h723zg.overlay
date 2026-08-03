@@ -1,0 +1,109 @@
+/*
+ * nucleo_h723zg audio bring-up overlay: two STM32 I2S blocks, one for each
+ * direction, both running as clock slaves, plus the DMA they depend on.
+ *
+ * This is the canonical board overlay for the toolkit's hardware target.
+ * The I2S node work (issues #33 and #35) and the AES3 loopback application
+ * (issue #36) are expected to reuse it verbatim rather than re-deriving the
+ * pin choices below.
+ *
+ * WHY TWO BLOCKS
+ * --------------
+ * The `st,stm32h7-i2s` driver returns -ENOSYS for I2S_DIR_BOTH and programs
+ * the transfer mode per direction on the same peripheral, so one block can
+ * only ever carry one direction. i2s2 transmits, i2s3 receives.
+ *
+ * WHY SLAVE
+ * ---------
+ * The DIX4192 is the audio clock master for this system; it owns MCLK, BCK
+ * and LRCK. Neither block may drive a clock, so neither node sets
+ * `mck-enabled` and no `i2sN_mck_*` pin is claimed. Master/slave itself is a
+ * runtime property of the STM32 driver, not a devicetree one: the direction
+ * is put into slave mode by passing I2S_OPT_FRAME_CLK_TARGET and
+ * I2S_OPT_BIT_CLK_TARGET to i2s_configure(). The absence of `mck-enabled`
+ * here is what makes that choice consistent - see tests/.../test_i2s_smoke.c,
+ * which asserts it at build time.
+ *
+ * PINS
+ * ----
+ * Data pins do not come from the `i2sN_*` pinctrl groups: the STM32H723ZG
+ * pinctrl file only defines `i2sN_ck_*`, `i2sN_ws_*` and `i2sN_mck_*`. SDO
+ * and SDI come from the SPI groups on the same peripheral, `spiN_mosi_*` and
+ * `spiN_miso_*` respectively.
+ *
+ *   i2s2 (TX, alternate function AF5)
+ *     BCK  PB10  i2s2_ck_pb10    Zio CN7 (ST variant pin 36)
+ *     LRCK PB12  i2s2_ws_pb12    Zio CN7 (ST variant pin 19, "I2S_A_WS")
+ *     SDO  PB15  spi2_mosi_pb15  Zio CN7 (ST variant pin 17, "I2S_A_SD")
+ *
+ *   i2s3 (RX, alternate function AF6)
+ *     BCK  PC10  i2s3_ck_pc10    Zio CN8 (ST variant pin 45, "SDMMC1_D2")
+ *     LRCK PA4   i2s3_ws_pa4     Zio CN7 (ST variant pin 24, "SPI_B_NSS")
+ *     SDI  PC11  spi3_miso_pc11  Zio CN8 (ST variant pin 46, "SDMMC1_D3")
+ *
+ * Both blocks are slaves on the *same* BCK and LRCK wires, so PB10 and PC10
+ * are strapped together to the DIX BCK, and PB12 and PA4 to the DIX LRCK.
+ *
+ * None of these pins is claimed by an enabled node in nucleo_h723zg.dts:
+ * Ethernet takes PA1/PA2/PA7/PB13/PC1/PC4/PC5/PG11/PG13, USB OTG HS takes
+ * PA11/PA12, the LEDs take PB0/PE1/PB14 (PB14 is also tim12), the user button
+ * takes PC13, usart3 takes PD8/PD9, usart2 PD5/PD6, lpuart1 PB6/PB7, spi1
+ * PA5/PA6/PB5/PD14, i2c1 PB8/PB9, fdcan1 PD0/PD1, and PB3 is SWO.
+ *
+ * Note on the block-to-direction assignment: i2s2 has to be the transmitter.
+ * Its only two SDI candidates are spi2_miso_pb14 - the red LED, also driven
+ * by pwm12 - and spi2_miso_pc2_c, which is the dual-pad PC2_C (Arduino A4)
+ * and depends on the SYSCFG analog switch. i2s3 has both spi3_miso_pc11 and
+ * spi3_mosi_pc12 free, so it takes whichever direction is left.
+ *
+ * DMA REACHABILITY AND CACHE ALIGNMENT - READ THIS BEFORE ADDING BUFFERS
+ * ---------------------------------------------------------------------
+ * The default `dmas` from stm32h7.dtsi put i2s2 TX on dmamux1 channel 0 and
+ * i2s3 RX on dmamux1 channel 1. dmamux1 channels 0..7 are served by dma1
+ * (dma-offset = 0, dma-requests = 8), which is why dma1 is enabled below and
+ * dma2 is not. The two channels are distinct, so the blocks do not collide -
+ * but they *would* if a future change enabled the opposite direction on
+ * either node, because both nodes default to the same channel pair.
+ *
+ * dma1 lives in the D2 domain and cannot address DTCM (0x20000000) or ITCM.
+ * Every buffer the I2S driver transfers from or into must therefore live in
+ * a region dma1 can see - the AXI SRAM at 0x24000000 that this board selects
+ * as `zephyr,sram` is fine; anything placed in DTCM via `__dtcm_bss_section`
+ * or a DTCM `zephyr,memory-region` is not, and fails silently.
+ *
+ * The driver also does its own cache maintenance around every transfer
+ * (sys_cache_data_flush_range() before TX, sys_cache_data_invd_range() after
+ * RX). Those operate on whole cache lines, so I2S block buffers must be
+ * aligned to the Cortex-M7 32-byte cache line *and* sized in whole multiples
+ * of it, or a flush/invalidate will corrupt whatever shares the end line.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	aliases {
+		i2s-tx = &i2s2;
+		i2s-rx = &i2s3;
+		audio-ctrl-i2c = &i2c1;
+	};
+};
+
+&dma1 {
+	status = "okay";
+};
+
+&dmamux1 {
+	status = "okay";
+};
+
+&i2s2 {
+	pinctrl-0 = <&i2s2_ck_pb10 &i2s2_ws_pb12 &spi2_mosi_pb15>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+&i2s3 {
+	pinctrl-0 = <&i2s3_ck_pc10 &i2s3_ws_pa4 &spi3_miso_pc11>;
+	pinctrl-names = "default";
+	status = "okay";
+};
