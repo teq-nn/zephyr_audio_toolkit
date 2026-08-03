@@ -178,6 +178,7 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER` | Build the file writer sink; selects `FILE_SYSTEM`. |
 | `CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER` | Build the gain filter. |
 | `CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK` | Build the null sink. |
+| `CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN` | Build the tone generator source. |
 
 - **Node symbols all default to `n`** and each one gates its node's source file, its state type and
   its `*_NODE_DEFINE()` macro. Enabling `AUDIO_PIPELINE` alone gives a pipeline with no nodes; an
@@ -202,7 +203,8 @@ zephyr-audio-pipeline/
 │                                           # audio_pipeline_events.h, audio_wav.h
 ├─ subsys/audio/pipeline/                   # core, config, events, node core, audio_internal.h,
 │  │                                        # audio_wav.c (RIFF/WAVE header read + write)
-│  └─ nodes/                                # file_reader, file_writer, gain_filter, null_sink
+│  └─ nodes/                                # file_reader, file_writer, gain_filter, null_sink,
+│                                           # tone_gen
 ├─ samples/audio/pipeline_basic/            # CMakeLists.txt, Kconfig, src/main.c
 ├─ tests/subsys/audio/pipeline/             # test_roundtrip.c, test_error_paths.c
 └─ tests/subsys/audio/wav/                  # test_wav.c, standalone header unit test

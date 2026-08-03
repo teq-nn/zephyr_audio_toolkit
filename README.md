@@ -25,10 +25,10 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
   `audio_wav.h` (reads *and* writes RIFF/WAVE headers; the only place that knows the byte layout).
 - `subsys/audio/pipeline/` – the implementation: `audio_pipeline_core.c`, `audio_pipeline_config.c`,
   `audio_pipeline_events.c`, `audio_node_core.c`, `audio_wav.c`, the private `audio_internal.h`,
-  plus `nodes/` (file reader, file writer, gain filter, null sink).
+  plus `nodes/` (file reader, file writer, gain filter, null sink, tone generator).
 - `samples/audio/pipeline_basic/` – reference application (`CMakeLists.txt`, `Kconfig`, `src/main.c`).
 - `tests/subsys/audio/pipeline/` – Ztest suites (`test_roundtrip.c`, `test_error_paths.c`); enables
-  all four shipped nodes.
+  every shipped node.
 - `tests/subsys/audio/no_file_nodes/` – the other end of the node selection range: only the gain
   filter and the null sink are built, and the suite checks that `CONFIG_FILE_SYSTEM` stays out of
   the generated configuration while a pipeline of the remaining nodes still runs.
@@ -60,6 +60,7 @@ nothing else:
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER` | `AUDIO_FILE_WRITER_NODE_DEFINE()` | selects `FILE_SYSTEM` |
 | `CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER` | `AUDIO_GAIN_FILTER_NODE_DEFINE()` | |
 | `CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK` | `AUDIO_NULL_SINK_NODE_DEFINE()` | |
+| `CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN` | `AUDIO_TONE_GEN_NODE_DEFINE()` | one tone per channel |
 
 Using a `*_NODE_DEFINE()` macro whose symbol is off is a build error naming the symbol that fixes
 it, so a missing line here is reported where it was made rather than at link time.

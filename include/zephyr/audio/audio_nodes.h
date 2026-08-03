@@ -20,6 +20,7 @@
 #define ZEPHYR_AUDIO_NODES_H_
 
 #include <stdbool.h>
+#include <zephyr/sys/util_macro.h>
 #include <zephyr/toolchain.h>
 #include <zephyr/types.h>
 
@@ -275,5 +276,116 @@ extern const struct audio_node_ops null_sink_node_ops;
 			       "AUDIO_PIPELINE_NODE_NULL_SINK")
 
 #endif /* CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK */
+
+/* -------------------------------------------------------------------------
+ * Tone generator source node
+ * -------------------------------------------------------------------------
+ */
+
+/** @brief Q15 full scale: table value * AUDIO_TONE_GEN_FULL_SCALE_Q15 >> 15. */
+#define AUDIO_TONE_GEN_FULL_SCALE_Q15 32768
+
+/**
+ * @brief Tones one tone generator definition can name.
+ *
+ * The v1 channel range (spec §5.2), because a definition names exactly one
+ * frequency per channel.
+ */
+#define AUDIO_TONE_GEN_MAX_TONES 2
+
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN
+
+/** @brief Per-instance state of the tone generator source node. */
+struct audio_tone_gen_state {
+	/**
+	 * Frequency of each channel's tone in Hz, in channel order, owned by
+	 * the definition macro. Per channel rather than per node on purpose:
+	 * left and right carrying different tones is how an analyzer downstream
+	 * tells a swapped pair of wires from a correct one.
+	 */
+	uint32_t freq_hz[AUDIO_TONE_GEN_MAX_TONES];
+	/**
+	 * Frequencies the definition named, i.e. how many entries of
+	 * @ref freq_hz are configuration rather than padding.
+	 *
+	 * Not a channel count: the channel count is the pipeline's and is read
+	 * from @c audio_node.pipeline_format (spec §5.2). This is what open()
+	 * checks *against* it, and a definition naming a different number of
+	 * tones than the pipeline carries is refused rather than adapted.
+	 */
+	uint8_t tone_count;
+	/**
+	 * Peak amplitude as a fraction of full scale in Q15;
+	 * ::AUDIO_TONE_GEN_FULL_SCALE_Q15 is full scale and 0 is silence.
+	 */
+	int32_t amplitude_q15;
+	/**
+	 * Samples to produce before the stream ends, counted as TOTAL
+	 * interleaved samples across all channels like every other sample count
+	 * in the subsystem (manifest §5), so it has to be a whole number of
+	 * interleaved sample sets.
+	 *
+	 * 0 runs indefinitely, which is what a loopback under test wants: it is
+	 * stopped by the application, not by the stimulus running out.
+	 */
+	uint32_t duration_samples;
+
+	/*
+	 * Everything below belongs to the node implementation. It is only
+	 * meaningful between a successful open() and the matching close(), and
+	 * an application must treat it as read-only.
+	 */
+
+	/** Phase of each tone as a fraction of a turn in 32 bit fixed point. */
+	uint32_t phase[AUDIO_TONE_GEN_MAX_TONES];
+	/** Phase added per sample, derived from the bound rate by open(). */
+	uint32_t phase_step[AUDIO_TONE_GEN_MAX_TONES];
+	/** Samples produced since open(), against @ref duration_samples. */
+	uint32_t produced;
+	/** True between a successful open() and its close(). */
+	bool is_open;
+};
+
+extern const struct audio_node_ops tone_gen_node_ops;
+
+/**
+ * @brief Statically define a tone generator source node.
+ *
+ * File scope only. Allocates the node and its ::audio_tone_gen_state.
+ * Needs @kconfig{CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN}.
+ *
+ * The frequencies are variadic because how many there are is the statement the
+ * definition makes about the pipeline it belongs in: one per channel, in
+ * channel order. open() refuses a pipeline whose channel count says otherwise
+ * rather than dropping or inventing a tone.
+ *
+ * @param _name             Symbol name of the @ref audio_node instance.
+ * @param _amplitude_q15    Peak amplitude in Q15
+ *                          (::AUDIO_TONE_GEN_FULL_SCALE_Q15 is full scale).
+ * @param _duration_samples Total interleaved samples to produce, 0 for an
+ *                          endless stream.
+ * @param ...               One frequency in Hz per channel, at most
+ *                          ::AUDIO_TONE_GEN_MAX_TONES of them.
+ */
+#define AUDIO_TONE_GEN_NODE_DEFINE(_name, _amplitude_q15, _duration_samples, ...)                  \
+	BUILD_ASSERT(NUM_VA_ARGS(__VA_ARGS__) >= 1 &&                                              \
+			     NUM_VA_ARGS(__VA_ARGS__) <= AUDIO_TONE_GEN_MAX_TONES,                 \
+		     "AUDIO_TONE_GEN_NODE_DEFINE() takes one frequency per "                       \
+		     "channel");                                                                   \
+	static struct audio_tone_gen_state _name##_state = {                                       \
+		.freq_hz = {__VA_ARGS__},                                                          \
+		.tone_count = NUM_VA_ARGS(__VA_ARGS__),                                            \
+		.amplitude_q15 = (_amplitude_q15),                                                 \
+		.duration_samples = (_duration_samples),                                           \
+	};                                                                                         \
+	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &tone_gen_node_ops, NULL, &_name##_state)
+
+#else /* CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN */
+
+#define AUDIO_TONE_GEN_NODE_DEFINE(_name, _amplitude_q15, _duration_samples, ...)                  \
+	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_SOURCE, "AUDIO_TONE_GEN_NODE_DEFINE",        \
+			       "AUDIO_PIPELINE_NODE_TONE_GEN")
+
+#endif /* CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN */
 
 #endif /* ZEPHYR_AUDIO_NODES_H_ */

@@ -18,6 +18,7 @@ target_sources(app PRIVATE
 	test_events.c
 	test_file_reader.c
 	test_file_writer.c
+	test_tone_gen.c
 	fake_nodes.c
 	wav_fixture.c
 )
