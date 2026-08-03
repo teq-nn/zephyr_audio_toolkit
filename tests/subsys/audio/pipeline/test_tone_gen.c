@@ -556,7 +556,8 @@ ZTEST(audio_pipeline_tone_gen, test_source_phase_does_not_drift_over_ten_seconds
 
 	zassert_true(tone_abs64(error) <= (int64_t)TONE_PHASE_TOLERANCE,
 		     "phase is off by %lld of 2^32 after %u samples, tolerance is %u",
-		     (long long)error, TONE_LONG_SAMPLES, TONE_PHASE_TOLERANCE);
+		     (long long)error, (unsigned int)TONE_LONG_SAMPLES,
+		     (unsigned int)TONE_PHASE_TOLERANCE);
 
 	/* The amplitude has to hold up as well: a resonator recurrence keeps
 	 * its frequency far better than its level, and a stimulus that fades
