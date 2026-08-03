@@ -85,7 +85,18 @@ It acts as the binding engineering contract for ongoing development.
 
 - Global frame size is defined via **Kconfig**:  
   `CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES`
-- This size governs latency and workload per processing cycle.
+- The value counts **total interleaved samples across all channels**, never samples per channel.
+  It is a buffer size, and the channel count is not available where the buffer is allocated: the
+  format is bound at run time (§4), so a per-channel figure would need a second, static channel
+  count to multiply by — exactly the duplicate owner §4 removes. A stereo frame of 128 therefore
+  carries 64 sample pairs, and `AUDIO_PIPELINE_DEFINE()` allocates `[frame_samples]` with no
+  channel multiplier.
+- This size governs latency and workload per processing cycle. Latency per iteration is
+  `frame_samples / (sample_rate_hz * channels)`.
+- The frame must hold at least one full interleaved sample set. The Kconfig range enforces that
+  for the channel counts the shipped nodes accept (minimum 2); the exact test needs the bound
+  format, so `audio_pipeline_set_format()` refuses a format with more channels than the frame has
+  samples.
 - The pipeline calls `process()` once per node per frame.
 
 ---

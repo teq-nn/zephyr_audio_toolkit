@@ -46,6 +46,10 @@ AUDIO_FILE_READER_NODE_DEFINE(reader, TRACK_PATH);
 AUDIO_GAIN_FILTER_NODE_DEFINE(gain, &reader, AUDIO_GAIN_UNITY_Q15 / 2);
 AUDIO_NULL_SINK_NODE_DEFINE(sink, &gain);
 
+/* CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES is the total interleaved sample count, so
+ * this stereo track runs on CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES / 2 sample
+ * pairs per frame - there is no channel multiplier to add here (manifest §5).
+ */
 AUDIO_PIPELINE_DEFINE(pipeline, CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES,
 		      CONFIG_AUDIO_PIPELINE_THREAD_STACK_SIZE, CONFIG_AUDIO_PIPELINE_THREAD_PRIO);
 

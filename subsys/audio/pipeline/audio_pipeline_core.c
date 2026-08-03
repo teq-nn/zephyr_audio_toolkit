@@ -604,6 +604,21 @@ int audio_pipeline_set_format(struct audio_pipeline *pipeline,
 		return -EINVAL;
 	}
 
+	/* frame_samples counts TOTAL interleaved samples across all channels
+	 * (issue #23), so this is where that count and the channel count first
+	 * meet: a frame that cannot hold one interleaved sample set is not a
+	 * short frame, it is a frame no node can put a single instant of audio
+	 * into. CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES has a compile-time floor for
+	 * the channel counts the shipped nodes accept; the exact test needs the
+	 * bound format and therefore lives here.
+	 */
+	if (pipeline->frame_capacity < (size_t)fmt->channels) {
+		LOG_ERR("a frame of %zu samples cannot hold one interleaved sample set for "
+			"%u channels",
+			pipeline->frame_capacity, fmt->channels);
+		return -EINVAL;
+	}
+
 	/* Only while the chain is closed (spec §5.2): the nodes read the format
 	 * in open() and hold it until they are closed, so swapping it underneath
 	 * an open chain would leave them running on a stale one. "Not playing"
