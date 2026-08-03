@@ -104,6 +104,28 @@ config AUDIO_PIPELINE_NODE_NULL_SINK
 	  Defaults to n so that the node set is opted into explicitly, like
 	  every other node symbol here.
 
+config AUDIO_PIPELINE_NODE_TONE_ANALYZER
+	bool "Tone analyzer sink node"
+	help
+	  Sink node that measures how much of each channel's energy sits at the
+	  frequency that channel was told to expect, and reports a verdict the
+	  application reads as a value rather than as a log line. It is the
+	  pass/fail oracle for a loopback: a link has a fixed but unmeasured
+	  latency, and the magnitude of a frequency component does not depend on
+	  where the measurement window starts, so it is the one comparison that
+	  can run before that latency is known.
+
+	  Every expected frequency is measured on every channel, which is what
+	  lets a swapped pair of wires be reported as a swap instead of as a
+	  pass. Needs no filesystem and no hardware, so a chain of the tone
+	  generator into this node runs on native_sim.
+
+	  Integer arithmetic throughout, deliberately: an oracle calling cosf()
+	  would put an FPU dependency on every target that defines one.
+
+	  Defaults to n so that the node set is opted into explicitly, like
+	  every other node symbol here.
+
 config AUDIO_PIPELINE_NODE_TONE_GEN
 	bool "Tone generator source node"
 	help

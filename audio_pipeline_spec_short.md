@@ -180,6 +180,7 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 | `CONFIG_AUDIO_PIPELINE_NODE_I2S_IN` | Build the I2S input source; selects `I2S`. Never reports EOF: a live input has no end. |
 | `CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT` | Build the I2S output sink; selects `I2S`. |
 | `CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK` | Build the null sink. |
+| `CONFIG_AUDIO_PIPELINE_NODE_TONE_ANALYZER` | Build the tone analyzer sink. |
 | `CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN` | Build the tone generator source. |
 
 - **Node symbols all default to `n`** and each one gates its node's source file, its state type and
@@ -208,7 +209,7 @@ zephyr-audio-pipeline/
 │  │                                        # audio_wav.c (RIFF/WAVE header read + write),
 │  │                                        # audio_i2s_wire.c (container <-> I2S wire words)
 │  └─ nodes/                                # file_reader, file_writer, gain_filter, i2s_in,
-│                                           # i2s_out, null_sink, tone_gen
+│                                           # i2s_out, null_sink, tone_analyzer, tone_gen
 ├─ samples/audio/pipeline_basic/            # CMakeLists.txt, Kconfig, src/main.c
 ├─ tests/subsys/audio/pipeline/             # test_roundtrip.c, test_error_paths.c
 ├─ tests/subsys/audio/i2s_wire/             # test_i2s_wire.c, no I2S device needed

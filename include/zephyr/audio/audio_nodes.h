@@ -41,6 +41,14 @@
 #include <zephyr/kernel.h>
 #endif
 
+/* The tone analyzer publishes a completed window to whichever thread asks for
+ * it, which is the one seam in the node set that is not confined to the
+ * pipeline thread, so its state carries a lock (spec §3.3).
+ */
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_TONE_ANALYZER
+#include <zephyr/spinlock.h>
+#endif
+
 /**
  * @brief Stand in for the *_NODE_DEFINE() of a node that was not built.
  *
@@ -573,6 +581,314 @@ extern const struct audio_node_ops null_sink_node_ops;
 			       "AUDIO_PIPELINE_NODE_NULL_SINK")
 
 #endif /* CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK */
+
+/* -------------------------------------------------------------------------
+ * Tone analyzer sink node
+ * -------------------------------------------------------------------------
+ */
+
+/**
+ * @brief Tones one tone analyzer definition can name, i.e. the channel range
+ *        it can measure.
+ *
+ * The v1 channel range (spec §5.2), because a definition names exactly one
+ * expected frequency per channel, the same pairing the tone generator makes at
+ * the other end of the link.
+ */
+#define AUDIO_TONE_ANALYZER_MAX_TONES 2
+
+/** @brief Channels one tone analyzer can measure - one expected tone each. */
+#define AUDIO_TONE_ANALYZER_MAX_CHANNELS AUDIO_TONE_ANALYZER_MAX_TONES
+
+/**
+ * @brief Shortest and longest integration window, in samples per channel.
+ *
+ * The window is what the measurement is averaged over, and both ends of the
+ * range are load bearing:
+ *
+ *  - The floor keeps the bin narrow enough to mean something (a window of N
+ *    samples resolves @c sample_rate_hz / N) and it is what makes the
+ *    accumulator bound below provable - see AUDIO_TONE_ANALYZER_STATE_MAX.
+ *  - The ceiling is what that same bound is computed from. A longer window
+ *    would not overflow silently, it would fail the build assertion in
+ *    tone_analyzer_node.c.
+ */
+#define AUDIO_TONE_ANALYZER_MIN_WINDOW 64U
+#define AUDIO_TONE_ANALYZER_MAX_WINDOW 4096U
+
+/**
+ * @brief Right shift applied to every container sample before it is measured,
+ *        and the bound that follows from it.
+ *
+ * The canonical container is S32_LE carrying an MSB-aligned value (spec §5.3),
+ * so the top 16 bits are the sample and what is below them is at least 90 dB
+ * under any tone this node is asked about. Measuring the narrowed value keeps
+ * every accumulator bound an order of magnitude away from its type's limit,
+ * and it costs nothing that a verdict could depend on: the node reports
+ * *ratios* of energies, and both sides of every ratio are narrowed alike.
+ */
+#define AUDIO_TONE_ANALYZER_INPUT_SHIFT 16
+#define AUDIO_TONE_ANALYZER_INPUT_MAX   32768
+
+/** @brief Q15 one, i.e. the full-scale value of every ratio reported below. */
+#define AUDIO_TONE_ANALYZER_UNITY_Q15 32768
+
+/**
+ * @brief In-band energy fraction a channel needs before its tone counts as
+ *        present.
+ *
+ * A pure tone at the expected frequency reads ::AUDIO_TONE_ANALYZER_UNITY_Q15;
+ * white noise of the same total energy reads @c 2/window of it, and a tone at
+ * some other frequency reads its leakage into the bin, which is smaller still.
+ * Half is therefore not a knife edge between the two - it is the middle of a
+ * gap of two orders of magnitude, and it leaves a real signal room for the
+ * hum, the noise floor and the quantisation a link adds on the way.
+ */
+#define AUDIO_TONE_ANALYZER_PASS_Q15 (AUDIO_TONE_ANALYZER_UNITY_Q15 / 2)
+
+/**
+ * @brief RMS below which a channel is called silent, in the narrowed 16 bit
+ *        domain of ::AUDIO_TONE_ANALYZER_INPUT_SHIFT.
+ *
+ * -66 dBFS. A muted link reads 0, a live one carrying nothing but its own
+ * noise floor reads a few counts, and any stimulus worth measuring reads
+ * thousands. Silence is reported as itself rather than as a missing tone
+ * because the two have different causes: no clock and no signal against a
+ * signal that arrived wrong.
+ */
+#define AUDIO_TONE_ANALYZER_SILENCE_RMS 16
+
+/**
+ * @brief Prediction residual, as a Q15 fraction of the signal's own energy,
+ *        below which a channel counts as tonal.
+ *
+ * Any single sinusoid obeys @c x[n-1] + x[n+1] == 2*cos(w)*x[n] exactly, at
+ * every frequency and every phase, so fitting one constant to that relation
+ * over the window and looking at what is left over separates "one tone" from
+ * "many tones or none" without knowing which tone it is. A sinusoid leaves
+ * only its own quantisation behind (parts per billion of its energy);
+ * broadband noise leaves about twice its energy. 5 % is between them with
+ * seven orders of magnitude to spare on the tonal side.
+ */
+#define AUDIO_TONE_ANALYZER_TONAL_Q15 (AUDIO_TONE_ANALYZER_UNITY_Q15 / 20)
+
+/** @brief What the analyzer made of the last completed window. */
+enum audio_tone_analyzer_verdict {
+	/** No window has completed since open(); nothing has been measured. */
+	AUDIO_TONE_ANALYZER_VERDICT_NONE = 0,
+	/** Every channel carries its own expected tone. */
+	AUDIO_TONE_ANALYZER_VERDICT_PASS,
+	/** At least one channel carries no signal at all. */
+	AUDIO_TONE_ANALYZER_VERDICT_SILENT,
+	/** Every channel carries another channel's expected tone. */
+	AUDIO_TONE_ANALYZER_VERDICT_SWAPPED,
+	/** A tone arrived, but not one that was expected on that channel. */
+	AUDIO_TONE_ANALYZER_VERDICT_WRONG_FREQ,
+	/** Energy arrived without a tone in it. */
+	AUDIO_TONE_ANALYZER_VERDICT_NOISE,
+};
+
+/** @brief What one channel looked like over the last completed window. */
+struct audio_tone_analyzer_channel_result {
+	/**
+	 * Energy this channel carried at each of the expected frequencies, as a
+	 * Q15 fraction of the channel's total energy over the window
+	 * (::AUDIO_TONE_ANALYZER_UNITY_Q15 is all of it).
+	 *
+	 * Indexed by *tone*, not by channel, and every tone is measured on
+	 * every channel: entry @c c of channel @c c is the tone that channel
+	 * should carry, and the others are what tells a swapped pair of wires
+	 * from a silent one. Reported against the total rather than as an
+	 * absolute level on purpose - an absolute magnitude cannot tell a
+	 * correct tone from a louder wrong one, and a fraction can.
+	 */
+	int32_t in_band_q15[AUDIO_TONE_ANALYZER_MAX_TONES];
+	/** RMS over the window, in the narrowed 16 bit domain (0..32767). */
+	int32_t rms;
+	/**
+	 * Residual left by the one-sinusoid fit, as a Q15 fraction of the
+	 * channel's energy; see ::AUDIO_TONE_ANALYZER_TONAL_Q15. Saturates at
+	 * @c INT32_MAX.
+	 */
+	int32_t residual_q15;
+	/**
+	 * Expected tone with the largest @ref in_band_q15, or -1 if the channel
+	 * carried none of them.
+	 */
+	int8_t strongest;
+	/** True when @ref residual_q15 is at or below the tonal threshold. */
+	bool tonal;
+	/** True when @ref rms is below ::AUDIO_TONE_ANALYZER_SILENCE_RMS. */
+	bool silent;
+};
+
+/**
+ * @brief The analyzer's verdict and the measurements behind it.
+ *
+ * Filled by audio_tone_analyzer_get_result(). Everything an application or a
+ * test needs is a value here: the node logs a verdict when it changes, but no
+ * decision depends on the log.
+ */
+struct audio_tone_analyzer_result {
+	/** Verdict for the last completed window. */
+	enum audio_tone_analyzer_verdict verdict;
+	/** Windows completed since open(); 0 means nothing was measured yet. */
+	uint32_t windows;
+	/** Length of the window that was measured, in samples per channel. */
+	uint32_t window_samples;
+	/** Channels measured, i.e. the bound format's channel count. */
+	uint8_t channels;
+	/** Expected frequencies the definition named, one per channel. */
+	uint8_t tones;
+	/** Per-channel measurements, in channel order. */
+	struct audio_tone_analyzer_channel_result channel[AUDIO_TONE_ANALYZER_MAX_CHANNELS];
+};
+
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_TONE_ANALYZER
+
+/** @brief Per-instance state of the tone analyzer sink node. */
+struct audio_tone_analyzer_state {
+	/**
+	 * Frequency each channel is expected to carry, in Hz and in channel
+	 * order, owned by the definition macro. Per channel rather than per
+	 * node because that is what makes a channel swap a distinguishable
+	 * result instead of an undetected pass.
+	 */
+	uint32_t freq_hz[AUDIO_TONE_ANALYZER_MAX_TONES];
+	/**
+	 * Frequencies the definition named, i.e. how many entries of
+	 * @ref freq_hz are configuration rather than padding.
+	 *
+	 * Not a channel count: the channel count is the pipeline's and is read
+	 * from @c audio_node.pipeline_format (spec §5.2). This is what open()
+	 * checks *against* it.
+	 */
+	uint8_t tone_count;
+	/**
+	 * Integration window in samples per channel, owned by the definition
+	 * macro; ::AUDIO_TONE_ANALYZER_MIN_WINDOW to
+	 * ::AUDIO_TONE_ANALYZER_MAX_WINDOW.
+	 */
+	uint32_t window_samples;
+
+	/*
+	 * Everything below belongs to the node implementation. It is only
+	 * meaningful between a successful open() and the matching close(), and
+	 * an application must treat it as read-only - @ref result through
+	 * audio_tone_analyzer_get_result() rather than by reaching in here.
+	 *
+	 * There is deliberately no sample rate and no channel count here: they
+	 * are pipeline-wide, owned by the pipeline, and read from
+	 * audio_node.pipeline_format wherever they are needed (manifest §4).
+	 */
+
+	/** Guards @ref result against the reader in another thread. */
+	struct k_spinlock lock;
+	/** Last completed window, published under @ref lock. */
+	struct audio_tone_analyzer_result result;
+	/** 2*cos(w) per expected tone in Q24, derived from the bound rate. */
+	int32_t coeff_q24[AUDIO_TONE_ANALYZER_MAX_TONES];
+	/** Goertzel state, one recurrence per channel and expected tone. */
+	int64_t s1[AUDIO_TONE_ANALYZER_MAX_CHANNELS][AUDIO_TONE_ANALYZER_MAX_TONES];
+	int64_t s2[AUDIO_TONE_ANALYZER_MAX_CHANNELS][AUDIO_TONE_ANALYZER_MAX_TONES];
+	/** Sum of x[n]^2 over the window, per channel. */
+	int64_t energy[AUDIO_TONE_ANALYZER_MAX_CHANNELS];
+	/** One-sinusoid fit: sums of x*x, y*y and x*y with y[n] = x[n-1]+x[n+1]. */
+	int64_t fit_xx[AUDIO_TONE_ANALYZER_MAX_CHANNELS];
+	int64_t fit_yy[AUDIO_TONE_ANALYZER_MAX_CHANNELS];
+	int64_t fit_xy[AUDIO_TONE_ANALYZER_MAX_CHANNELS];
+	/** The two previous samples of each channel, for the fit above. */
+	int32_t prev1[AUDIO_TONE_ANALYZER_MAX_CHANNELS];
+	int32_t prev2[AUDIO_TONE_ANALYZER_MAX_CHANNELS];
+	/** Samples of each channel already in @ref prev1 / @ref prev2, up to 2. */
+	uint8_t history[AUDIO_TONE_ANALYZER_MAX_CHANNELS];
+	/** Sample sets folded into the window so far. */
+	uint32_t filled;
+	/** Position inside the interleaved sample set, carried across frames. */
+	uint8_t channel_pos;
+	/** True between a successful open() and its close(). */
+	bool is_open;
+};
+
+extern const struct audio_node_ops tone_analyzer_node_ops;
+
+/**
+ * @brief Read the analyzer's verdict and the measurements behind it.
+ *
+ * The result is the node's product, so it is a value an application reads
+ * rather than a line it has to parse out of a log: the loopback application
+ * needs the verdict to decide, and a Ztest needs it to assert.
+ *
+ * Safe to call from any thread and at any time, including while the pipeline
+ * is running: the node publishes a completed window under a spinlock and this
+ * copies it out under the same one, so a reader never sees half of one window
+ * and half of the next. It is the only part of the node that is not confined
+ * to the pipeline thread (spec §3.3); the three ops still are.
+ *
+ * @param node   Node defined with AUDIO_TONE_ANALYZER_NODE_DEFINE().
+ * @param result Filled with the last completed window. Before the first one
+ *               completes this reports ::AUDIO_TONE_ANALYZER_VERDICT_NONE and
+ *               a @c windows count of 0.
+ *
+ * @retval 0 on success
+ * @retval -EINVAL if @p node or @p result is NULL, or @p node is not a tone
+ *         analyzer
+ */
+int audio_tone_analyzer_get_result(const struct audio_node *node,
+				   struct audio_tone_analyzer_result *result);
+
+/**
+ * @brief Statically define a tone analyzer sink node.
+ *
+ * File scope only. Allocates the node and its ::audio_tone_analyzer_state, so
+ * two analyzers share no accumulator and no verdict.
+ * Needs @kconfig{CONFIG_AUDIO_PIPELINE_NODE_TONE_ANALYZER}.
+ *
+ * The frequencies are variadic and there is one per channel, in channel order,
+ * exactly as in AUDIO_TONE_GEN_NODE_DEFINE(): the two macros describe the two
+ * ends of the same link, and open() refuses a pipeline whose channel count says
+ * otherwise rather than dropping or inventing an expectation.
+ *
+ * The window is a definition-time figure rather than a Kconfig symbol because
+ * it is a property of what is being measured, not of the image: it sets the bin
+ * width (@c sample_rate_hz / @p _window_samples) and therefore how far apart
+ * two frequencies have to be before the analyzer can tell them apart. Pick one
+ * where the expected frequencies land on whole bins - 960 samples at 48 kHz
+ * puts 1 kHz on bin 20 and 3 kHz on bin 60 - and the measurement is exactly
+ * offset invariant instead of merely nearly so.
+ *
+ * @param _name           Symbol name of the @ref audio_node instance.
+ * @param _upstream       Pointer to the upstream node.
+ * @param _window_samples Integration window in samples per channel,
+ *                        ::AUDIO_TONE_ANALYZER_MIN_WINDOW to
+ *                        ::AUDIO_TONE_ANALYZER_MAX_WINDOW.
+ * @param ...             One expected frequency in Hz per channel, at most
+ *                        ::AUDIO_TONE_ANALYZER_MAX_TONES of them.
+ */
+#define AUDIO_TONE_ANALYZER_NODE_DEFINE(_name, _upstream, _window_samples, ...)                    \
+	BUILD_ASSERT(NUM_VA_ARGS(__VA_ARGS__) >= 1 &&                                              \
+			     NUM_VA_ARGS(__VA_ARGS__) <= AUDIO_TONE_ANALYZER_MAX_TONES,            \
+		     "AUDIO_TONE_ANALYZER_NODE_DEFINE() takes one expected frequency per "         \
+		     "channel");                                                                   \
+	BUILD_ASSERT((_window_samples) >= AUDIO_TONE_ANALYZER_MIN_WINDOW &&                        \
+			     (_window_samples) <= AUDIO_TONE_ANALYZER_MAX_WINDOW,                  \
+		     "AUDIO_TONE_ANALYZER_NODE_DEFINE(" #_name "): the window is outside the "     \
+		     "range the accumulator bound is proved for");                                 \
+	static struct audio_tone_analyzer_state _name##_state = {                                  \
+		.freq_hz = {__VA_ARGS__},                                                          \
+		.tone_count = NUM_VA_ARGS(__VA_ARGS__),                                            \
+		.window_samples = (_window_samples),                                               \
+	};                                                                                         \
+	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SINK, &tone_analyzer_node_ops, (_upstream),       \
+			  &_name##_state)
+
+#else /* CONFIG_AUDIO_PIPELINE_NODE_TONE_ANALYZER */
+
+#define AUDIO_TONE_ANALYZER_NODE_DEFINE(_name, _upstream, _window_samples, ...)                    \
+	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_SINK, "AUDIO_TONE_ANALYZER_NODE_DEFINE",     \
+			       "AUDIO_PIPELINE_NODE_TONE_ANALYZER")
+
+#endif /* CONFIG_AUDIO_PIPELINE_NODE_TONE_ANALYZER */
 
 /* -------------------------------------------------------------------------
  * Tone generator source node

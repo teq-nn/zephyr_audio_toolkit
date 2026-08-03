@@ -527,6 +527,9 @@ config AUDIO_PIPELINE_NODE_I2S_OUT
 config AUDIO_PIPELINE_NODE_NULL_SINK
     bool "Null sink node"
 
+config AUDIO_PIPELINE_NODE_TONE_ANALYZER
+    bool "Tone analyzer sink node"
+
 config AUDIO_PIPELINE_NODE_TONE_GEN
     bool "Tone generator source node"
 ```
@@ -967,6 +970,52 @@ verified against a scriptable I2S controller on `native_sim`
 decided before the first bit arrives, since a clock target with no master would block in
 `i2s_read()` forever.
 
+### 10.7 Tone analyzer node (sink)
+
+- Task:
+  - measures, per channel, how much of the channel's energy sits at the frequency that channel
+    was told to expect,
+  - turns that into a verdict — pass, silent, swapped, wrong frequency or noise.
+
+It is the pass/fail oracle for a loopback, and it **measures rather than compares** because the
+link under test has a fixed but unmeasured latency: a sample-by-sample comparison against the
+transmitted stream fails even when the system is correct, while the magnitude of a frequency
+component does not depend on where the window starts. That offset invariance is the property the
+node exists for; everything below serves it.
+
+- **The result is a value, not a log line.**
+
+  ```c
+  int audio_tone_analyzer_get_result(const struct audio_node *node,
+                                     struct audio_tone_analyzer_result *result);
+  ```
+
+  A Ztest cannot assert against a log and the loopback application needs the verdict to decide, so
+  the completed window is published as a `struct audio_tone_analyzer_result`: the verdict, and per
+  channel the in-band energy at *every* expected frequency, the RMS, and the residual of a
+  one-sinusoid fit. This is the one seam in the node set that crosses a thread boundary — the ops
+  stay confined to the pipeline thread (§3.3), while the getter may be called from any thread, so
+  the node publishes and copies out under a spinlock of its own.
+- **In band against total, never an absolute level.** Energy at the expected frequency is reported
+  as a Q15 fraction of the channel's total energy, so a correct tone is distinguishable from a
+  louder wrong one. An absolute magnitude cannot make that distinction.
+- **Every frequency is measured on every channel.** One measurement per channel would answer "is a
+  tone present", which a swapped pair of wires also answers with yes. Measuring all of them on all
+  of them is what makes `SWAPPED` a verdict rather than a `PASS`.
+- **Integer arithmetic with a proved accumulator bound.** One Goertzel recurrence per (channel,
+  tone) pair, closed with `|X|^2 = s1^2 + s2^2 - 2cos(w)*s1*s2` — an identity that holds for an
+  arbitrary real `w`, so a target between two bins is measured where it is rather than read low.
+  The recurrence state is bounded by `N * max|x| / |sin w|`, far above the magnitude it yields, so
+  the state is `int64_t`, the input is narrowed to the container's top 16 bits, the window is
+  capped by `AUDIO_TONE_ANALYZER_MAX_WINDOW` and `open()` refuses a frequency closer than one bin
+  to DC or Nyquist. Together those make the bound a constant the node asserts at build time.
+  Floating point and libm are absent for the same reason as in the generator.
+
+Sample rate and channel count are read from `node->pipeline_format` and stored nowhere (§5.2).
+`process()` does not block: it pulls, folds the frame into the accumulators and returns. A partial
+window is dropped at end of stream rather than measured short, because a window that never filled
+reads low and would turn a clean EOF into a failure.
+
 ---
 
 ## 11. Memory & Module Structure
@@ -1076,6 +1125,7 @@ zephyr-audio-pipeline/
 │            ├─ i2s_in_node.c
 │            ├─ i2s_out_node.c
 │            ├─ null_sink_node.c
+│            ├─ tone_analyzer_node.c
 │            └─ tone_gen_node.c
 ├─ samples/
 │  └─ audio/

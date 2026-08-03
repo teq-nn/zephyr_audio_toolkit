@@ -255,6 +255,7 @@ zephyr-audio-pipeline/
 │      ├─ i2s_in_node.c
 │      ├─ i2s_out_node.c
 │      ├─ null_sink_node.c
+│      ├─ tone_analyzer_node.c
 │      └─ tone_gen_node.c
 ├─ samples/audio/pipeline_basic/
 │  ├─ CMakeLists.txt
@@ -281,7 +282,8 @@ zephyr-audio-pipeline/
    │  ├─ test_events.c               # k_msgq event queue
    │  ├─ test_file_reader.c          # WAV source, S16→S32 widening
    │  ├─ test_file_writer.c          # WAV sink, S32→S16 truncation
-   │  └─ test_tone_gen.c             # tone source: frequency, phase, duration
+   │  ├─ test_tone_gen.c             # tone source: frequency, phase, duration
+   │  └─ test_tone_analyzer.c        # tone sink: offset invariance, the four cases, the swap
    ├─ i2s_in_node/               # the I2S source against a scriptable device, no hardware
    │  ├─ CMakeLists.txt
    │  ├─ prj.conf

@@ -28,7 +28,7 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
 - `subsys/audio/pipeline/` – the implementation: `audio_pipeline_core.c`, `audio_pipeline_config.c`,
   `audio_pipeline_events.c`, `audio_node_core.c`, `audio_wav.c`, `audio_i2s_wire.c`, the private
   `audio_internal.h`, plus `nodes/` (file reader, file writer, gain filter, I2S input, I2S output,
-  null sink, tone generator).
+  null sink, tone analyzer, tone generator).
 - `samples/audio/pipeline_basic/` – reference application (`CMakeLists.txt`, `Kconfig`, `src/main.c`).
 - `tests/subsys/audio/pipeline/` – Ztest suites (`test_roundtrip.c`, `test_error_paths.c`); enables
   every shipped node.
@@ -81,6 +81,7 @@ nothing else:
 | `CONFIG_AUDIO_PIPELINE_NODE_I2S_IN` | `AUDIO_I2S_IN_NODE_DEFINE()` | selects `I2S`; device from devicetree, slave only; a live source never reports EOF |
 | `CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT` | `AUDIO_I2S_OUT_NODE_DEFINE()` | selects `I2S`; device and clock role come from devicetree, slave only |
 | `CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK` | `AUDIO_NULL_SINK_NODE_DEFINE()` | |
+| `CONFIG_AUDIO_PIPELINE_NODE_TONE_ANALYZER` | `AUDIO_TONE_ANALYZER_NODE_DEFINE()` | one expected tone per channel; verdict read with `audio_tone_analyzer_get_result()` |
 | `CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN` | `AUDIO_TONE_GEN_NODE_DEFINE()` | one tone per channel |
 
 Using a `*_NODE_DEFINE()` macro whose symbol is off is a build error naming the symbol that fixes
