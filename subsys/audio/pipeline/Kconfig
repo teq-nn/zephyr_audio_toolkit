@@ -56,6 +56,24 @@ config AUDIO_PIPELINE_NODE_GAIN_FILTER
 	  nobody notices it. Uniformity is the point: one rule for all four
 	  shipped nodes is easier to reason about than a size threshold.
 
+config AUDIO_PIPELINE_NODE_I2S_OUT
+	bool "I2S output sink node"
+	select I2S
+	help
+	  Sink node that transmits the stream through a Zephyr I2S device. That
+	  API is why this symbol, and not AUDIO_PIPELINE, selects I2S: a node's
+	  dependencies belong to the node's symbol, exactly as FILE_SYSTEM
+	  belongs to the two file nodes. The select only pulls in the subsystem;
+	  the application still enables a driver and describes the peripheral in
+	  devicetree, which is also where the node gets its device from.
+
+	  The node is a clock target on every path it has - the codec owns MCLK,
+	  BCK and LRCK on the systems this is built for - and there is
+	  deliberately no option here to make it a controller.
+
+	  Defaults to n like every other node symbol here, so the set of nodes
+	  in an image is visible in prj.conf.
+
 config AUDIO_PIPELINE_NODE_NULL_SINK
 	bool "Null sink node"
 	help

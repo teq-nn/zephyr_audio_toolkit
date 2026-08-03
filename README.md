@@ -22,10 +22,13 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
 - `Kconfig` – module root menu; `rsource`s the subsystem Kconfig.
 - `include/zephyr/audio/` – public headers other Zephyr applications include:
   `audio_format.h`, `audio_node.h`, `audio_nodes.h`, `audio_pipeline.h`, `audio_pipeline_events.h`,
-  `audio_wav.h` (reads *and* writes RIFF/WAVE headers; the only place that knows the byte layout).
+  `audio_wav.h` (reads *and* writes RIFF/WAVE headers; the only place that knows the byte layout),
+  `audio_i2s_wire.h` (maps the canonical container to I2S wire words and back; shared by the I2S
+  sink and the I2S source, so the two ends of a link cannot drift apart).
 - `subsys/audio/pipeline/` – the implementation: `audio_pipeline_core.c`, `audio_pipeline_config.c`,
-  `audio_pipeline_events.c`, `audio_node_core.c`, `audio_wav.c`, the private `audio_internal.h`,
-  plus `nodes/` (file reader, file writer, gain filter, null sink, tone generator).
+  `audio_pipeline_events.c`, `audio_node_core.c`, `audio_wav.c`, `audio_i2s_wire.c`, the private
+  `audio_internal.h`, plus `nodes/` (file reader, file writer, gain filter, I2S output, null sink,
+  tone generator).
 - `samples/audio/pipeline_basic/` – reference application (`CMakeLists.txt`, `Kconfig`, `src/main.c`).
 - `tests/subsys/audio/pipeline/` – Ztest suites (`test_roundtrip.c`, `test_error_paths.c`); enables
   every shipped node.
@@ -33,11 +36,18 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
   filter and the null sink are built, and the suite checks that `CONFIG_FILE_SYSTEM` stays out of
   the generated configuration while a pipeline of the remaining nodes still runs.
 - `tests/subsys/audio/wav/` – standalone WAV header unit test (`test_wav.c`), no pipeline needed.
+- `tests/subsys/audio/i2s_wire/` – unit test for the container-to-wire seam the I2S nodes share
+  (`test_i2s_wire.c`); pure arithmetic, so it runs on `native_sim` with no I2S device.
 - `tests/boards/nucleo_h723zg/i2s_smoke/` – board bring-up smoke test: two I2S blocks (i2s2 TX,
   i2s3 RX, both clock slaves) and the control I2C report ready. Its
   `boards/nucleo_h723zg.overlay` is the canonical board overlay for the hardware target — the
   audio pinout, the TX/RX block split and the DMA reachability constraint live there, and hardware
   work reuses it instead of restating it. Twister filters the suite out of `native_sim` runs.
+- `tests/boards/nucleo_h723zg/i2s_out_node/` – the I2S output sink on the same target. Its overlay
+  includes the smoke test's rather than copying it. Build-time assertions cover the transfer
+  blocks' DMA reachability and cache alignment, the clock role and the block-size arithmetic; the
+  run-time cases open and close the chain, which needs no external clock. No frame is pulled — a
+  clock target only advances while the codec clocks it.
 
 Headers are installed under the `zephyr/audio/` namespace, so applications include them as
 `#include <zephyr/audio/audio_pipeline.h>`.
@@ -59,6 +69,7 @@ nothing else:
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_READER` | `AUDIO_FILE_READER_NODE_DEFINE()` | selects `FILE_SYSTEM` |
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER` | `AUDIO_FILE_WRITER_NODE_DEFINE()` | selects `FILE_SYSTEM` |
 | `CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER` | `AUDIO_GAIN_FILTER_NODE_DEFINE()` | |
+| `CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT` | `AUDIO_I2S_OUT_NODE_DEFINE()` | selects `I2S`; device and clock role come from devicetree, slave only |
 | `CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK` | `AUDIO_NULL_SINK_NODE_DEFINE()` | |
 | `CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN` | `AUDIO_TONE_GEN_NODE_DEFINE()` | one tone per channel |
 

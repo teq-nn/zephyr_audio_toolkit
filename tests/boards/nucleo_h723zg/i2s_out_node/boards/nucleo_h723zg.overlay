@@ -1,0 +1,12 @@
+/*
+ * The board's audio configuration is the smoke test's overlay, included rather
+ * than copied: it is the canonical description of this target (the pin choices,
+ * the TX/RX block split and the DMA reachability constraint), and two copies of
+ * it would be two things to keep in step. Zephyr's board-overlay lookup finds
+ * this file by name, and the preprocessor resolves the quoted path relative to
+ * it.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "../../i2s_smoke/boards/nucleo_h723zg.overlay"
