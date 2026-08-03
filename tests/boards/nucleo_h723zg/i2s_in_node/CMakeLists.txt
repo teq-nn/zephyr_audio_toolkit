@@ -4,7 +4,9 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(nucleo_h723zg_i2s_in_node)
 
 # boards/nucleo_h723zg.overlay is picked up by Zephyr's standard board-overlay
-# lookup, so it is not listed here. The node arrives with the subsystem, which
+# lookup, so it is not listed here; it includes the canonical overlay at
+# dts/boards/nucleo_h723zg.overlay, whose bindings directory reaches this
+# build through the module's dts_root setting. The node arrives with the subsystem, which
 # is a Zephyr module gated on CONFIG_AUDIO_PIPELINE_NODE_I2S_IN.
 target_sources(app PRIVATE
 	test_i2s_in_node.c

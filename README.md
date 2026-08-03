@@ -17,7 +17,15 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
 - `audio_pipeline_spec_short.md` – the onboarding digest of the two documents above; refresh it
   whenever the manifest or spec changes materially.
 - `AGENTS.md` – contributor and agent guidelines (structure, style, testing, review).
-- `zephyr/module.yml` – Zephyr module metadata; points the build at the root `CMakeLists.txt` and `Kconfig`. Zephyr only discovers modules via `zephyr/module.{yml,yaml}`, so this path is not optional.
+- `zephyr/module.yml` – Zephyr module metadata; points the build at the root `CMakeLists.txt` and `Kconfig`, and sets `dts_root: .` so `dts/bindings/` is searched by every consumer. Zephyr only discovers modules via `zephyr/module.{yml,yaml}`, so this path is not optional.
+- `dts/boards/nucleo_h723zg.overlay` – the canonical board overlay for the hardware target: the
+  audio pinout, the TX/RX block split, the clock roles, the AK4619 codec on the control I2C bus and
+  the DMA reachability constraint. It lives outside `tests/` and `samples/` so both can include it
+  without reaching into the other; each consumer's own `boards/nucleo_h723zg.overlay` is a
+  one-line `#include` of it. The wiring it describes is worked out in
+  `docs/hardware/akd4619-evaluation-board.md`.
+- `dts/bindings/audio/asahi-kasei,ak4619.yaml` – minimal binding for the codec node in that
+  overlay; the codec driver's ticket fills it in.
 - `CMakeLists.txt` – module root; adds `subsys/audio/pipeline`.
 - `Kconfig` – module root menu; `rsource`s the subsystem Kconfig.
 - `include/zephyr/audio/` – public headers other Zephyr applications include:
@@ -44,19 +52,19 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
   timeout, a driver failure and an RX overrun can be produced on `native_sim`. It is where the
   rule that a live source never reports end of stream, and that every block goes back to the slab,
   are actually checked.
-- `tests/boards/nucleo_h723zg/i2s_smoke/` – board bring-up smoke test: two I2S blocks (i2s2 TX,
-  i2s3 RX, both clock slaves) and the control I2C report ready. Its
-  `boards/nucleo_h723zg.overlay` is the canonical board overlay for the hardware target — the
-  audio pinout, the TX/RX block split and the DMA reachability constraint live there, and hardware
-  work reuses it instead of restating it. Twister filters the suite out of `native_sim` runs.
+- `tests/boards/nucleo_h723zg/i2s_smoke/` – board bring-up smoke test: two I2S blocks (i2s2 TX and
+  the clock source, i2s3 RX and a clock target) and the control I2C report ready. Its
+  `boards/nucleo_h723zg.overlay` includes `dts/boards/nucleo_h723zg.overlay` rather than restating
+  it. Twister filters the suite out of `native_sim` runs.
 - `tests/boards/nucleo_h723zg/i2s_out_node/` – the I2S output sink on the same target. Its overlay
-  includes the smoke test's rather than copying it. Build-time assertions cover the transfer
-  blocks' DMA reachability and cache alignment, the clock role and the block-size arithmetic; the
-  run-time cases open and close the chain, which needs no external clock. No frame is pulled — a
-  clock target only advances while the codec clocks it.
+  includes the canonical one too. Build-time assertions cover the transfer blocks' DMA
+  reachability and cache alignment, the clock role and the block-size arithmetic; the run-time
+  cases open and close the chain, which needs no external clock. No frame is pulled — the node
+  still configures itself as a clock target, so nothing advances until the loopback application
+  makes it a controller.
 - `tests/boards/nucleo_h723zg/i2s_in_node/` – the same for the I2S input source on `i2s3`. No frame
-  is pulled here either: a source that is a clock target would block in `i2s_read()` until a master
-  appears, so the node's behaviour is covered by the `native_sim` suite instead.
+  is pulled here either: a source that is a clock target blocks in `i2s_read()` until the transmit
+  block clocks it, so the node's behaviour is covered by the `native_sim` suite instead.
 
 Headers are installed under the `zephyr/audio/` namespace, so applications include them as
 `#include <zephyr/audio/audio_pipeline.h>`.

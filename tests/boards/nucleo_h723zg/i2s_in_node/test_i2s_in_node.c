@@ -1,11 +1,13 @@
 /*
  * Board suite for the I2S input source node on the nucleo_h723zg target.
  *
- * Honest about what a board without a clock master can answer. The node is a
- * clock *target*: no block ever arrives unless the codec clocks it, and the
- * read that waits for one waits forever by design, so this suite never pulls a
- * frame and makes no claim about captured audio, overrun recovery or pacing -
- * those need the AES3 link and belong to the loopback application. The
+ * Honest about what a board with nothing wired to it can answer. The node is a
+ * clock *target*: no block ever arrives until something clocks it - here the
+ * transmit block, which the overlay makes the clock source (#43, #44) - and
+ * the read that waits for one waits forever by design, so this suite never
+ * pulls a frame and makes no claim about captured audio, overrun recovery or
+ * pacing - those need the whole link and belong to the loopback application.
+ * The
  * behaviour of the node itself is covered without hardware in
  * tests/subsys/audio/i2s_in_node, against a scriptable device.
  *
@@ -63,14 +65,16 @@ BUILD_ASSERT(DT_NODE_HAS_STATUS_OKAY(I2S_RX_NODE),
 	     "the i2s-rx alias must resolve to an enabled node");
 
 /*
- * The codec owns the clocks. The absence of mck-enabled keeps the devicetree
- * honest about that; AUDIO_I2S_IN_RX_OPTIONS keeps the driver configuration
- * honest about it, and being exactly the two target bits is the stronger claim
- * - the controller constants are zero, so an option word that had lost a bit
- * would silently mean "controller" rather than fail.
+ * The transmit block owns the clocks, so this one drives nothing: exactly one
+ * block may drive the shared BICK and LRCK wires (#43 §2). The absence of
+ * mck-enabled keeps the devicetree honest about that; AUDIO_I2S_IN_RX_OPTIONS
+ * keeps the driver configuration honest about it, and being exactly the two
+ * target bits is the stronger claim - the controller constants are zero, so an
+ * option word that had lost a bit would silently mean "controller" rather than
+ * fail.
  */
 BUILD_ASSERT(!DT_PROP(I2S_RX_NODE, mck_enabled),
-	     "the receive block must not drive MCLK: the codec is the clock master");
+	     "the receive block must not drive MCLK: the transmit block is the clock source");
 BUILD_ASSERT(AUDIO_I2S_IN_RX_OPTIONS == (I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT_CLK_TARGET),
 	     "the source must configure both clocks as targets and nothing else");
 

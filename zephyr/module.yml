@@ -2,3 +2,8 @@ name: zephyr-audio-pipeline
 build:
   cmake: .
   kconfig: Kconfig
+settings:
+  # Puts <module root>/dts/bindings on DTS_ROOT, so the bindings the shared
+  # board overlay in dts/boards/ needs are found by every consumer without
+  # each test and sample listing them.
+  dts_root: .

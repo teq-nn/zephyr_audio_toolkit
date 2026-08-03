@@ -1,0 +1,209 @@
+/*
+ * nucleo_h723zg audio bring-up overlay: two STM32 I2S blocks, one for each
+ * direction, the control I2C bus with the AK4619 codec on it, and the DMA the
+ * blocks depend on.
+ *
+ * This is the canonical board overlay for the toolkit's hardware target and
+ * the only copy. It sits outside both `tests/` and `samples/` precisely so
+ * that neither has to reach across into the other: each consumer keeps a
+ * `boards/nucleo_h723zg.overlay` of its own that does nothing but `#include`
+ * this file, which Zephyr's board-overlay lookup finds by name and the
+ * preprocessor resolves relative to. Two copies of it would be two things to
+ * keep in step.
+ *
+ * The wiring described here is the AKM AKD4619-A evaluation board, derived in
+ * docs/hardware/akd4619-evaluation-board.md (issue #43). That document is
+ * authoritative for every board-side setting quoted below - switch positions,
+ * jumpers, the PORT401 pinout and the clock topology - and records what is
+ * read off AKM's schematic sheets rather than its body text.
+ *
+ * WHY TWO BLOCKS
+ * --------------
+ * The `st,stm32h7-i2s` driver returns -ENOSYS for I2S_DIR_BOTH and programs
+ * the transfer mode per direction on the same peripheral, so one block can
+ * only ever carry one direction. i2s2 transmits, i2s3 receives.
+ *
+ * WHY THE STM32 IS THE CLOCK SOURCE
+ * ---------------------------------
+ * i2s2 generates MCLK, BICK and LRCK; the codec receives all three. Three
+ * facts force it and no board setting can undo them (#43 §2):
+ *
+ *   1. The AK4619 cannot master anything. LRCK, BICK and MCLK are all
+ *      direction *input* pins, and the part has no PLL and no clock output.
+ *   2. The evaluation board's own 24.576 MHz crystal belongs to the AK4118A,
+ *      whose MCKO1/BICK/LRCK reach the codec only through the `DIO` position
+ *      of the PORT402/403/405 selectors. They are not routed to PORT401.
+ *   3. PORT401's clock pins are inputs in hardware: they pass through U401, a
+ *      74AVC4T245PW whose DIR pins are strapped, so the buffer physically
+ *      cannot drive a clock outward.
+ *
+ * So the only topology in which the two boards share a clock is the one where
+ * the Nucleo generates it. i2s2 therefore sets `mck-enabled` and claims
+ * `i2s2_mck_pc6`; i2s3 gains neither, and stays a clock target on the *same*
+ * BICK and LRCK wires. Exactly one of the two blocks may drive them - make
+ * both masters and two push-pull outputs fight on every strap.
+ *
+ * Master/target is otherwise a runtime property of the STM32 driver, not a
+ * devicetree one: a direction becomes a target by passing
+ * I2S_OPT_FRAME_CLK_TARGET and I2S_OPT_BIT_CLK_TARGET to i2s_configure(), so
+ * the RX direction passes both and the TX direction passes neither. The
+ * presence of `mck-enabled` on i2s2 and its absence on i2s3 is what keeps that
+ * choice honest - see tests/.../test_i2s_smoke.c, which asserts both at build
+ * time.
+ *
+ * Zephyr's STM32 I2S driver emits MCLK at 256 fs (`bit_clk_freq *= 4` for a
+ * 32-bit channel length on top of a 64 fs bit clock, drivers/i2s/i2s_stm32.c).
+ * At 48 kHz that is MCLK 12.288 MHz and BICK 3.072 MHz, inside the AK4619's
+ * 2.027-24.822 MHz MCLK range and matching its *default* FS[2:0] = 000.
+ *
+ * Start order follows from this: configure the codec over I2C, then start
+ * i2s2, then i2s3. The clocks do not exist until the master block starts.
+ *
+ * PINS
+ * ----
+ * Data pins do not come from the `i2sN_*` pinctrl groups: the STM32H723ZG
+ * pinctrl file only defines `i2sN_ck_*`, `i2sN_ws_*` and `i2sN_mck_*`. SDO
+ * and SDI come from the SPI groups on the same peripheral, `spiN_mosi_*` and
+ * `spiN_miso_*` respectively.
+ *
+ *   i2s2 (TX and the clock source, alternate function AF5)
+ *     MCLK PC6   i2s2_mck_pc6    PORT401 pin 1   Zio; position per UM2407
+ *     BCK  PB10  i2s2_ck_pb10    PORT401 pin 3   Zio CN7 (ST variant pin 36)
+ *     LRCK PB12  i2s2_ws_pb12    PORT401 pin 5   Zio CN7 (pin 19, "I2S_A_WS")
+ *     SDO  PB15  spi2_mosi_pb15  PORT401 pin 9   Zio CN7 (pin 17, "I2S_A_SD")
+ *                                (SDIN1, the codec's DAC input)
+ *
+ *   i2s3 (RX, clock target, alternate function AF6)
+ *     BCK  PC10  i2s3_ck_pc10    PORT401 pin 3   Zio CN8 (pin 45, "SDMMC1_D2")
+ *     LRCK PA4   i2s3_ws_pa4     PORT401 pin 5   Zio CN7 (pin 24, "SPI_B_NSS")
+ *     SDI  PC11  spi3_miso_pc11  PORT401 pin 13  Zio CN8 (pin 46, "SDMMC1_D3")
+ *                                (SDOUT1, the codec's ADC output)
+ *
+ * Both blocks sit on the *same* BCK and LRCK wires, so PB10 and PC10 are
+ * strapped together to PORT401 pin 3 and PB12 and PA4 to PORT401 pin 5; i2s2
+ * drives both straps and i2s3 receives them. PORT401's even pins are ground
+ * (#43 §3.1, confirm with a meter). The connector position of PC6 is the one
+ * thing this pinout does not assert - read it off UM2407 or the silkscreen
+ * before wiring MCLK (#43 UNRESOLVED-6).
+ *
+ * PIN BUDGET
+ * ----------
+ * Re-derived against boards/st/nucleo_h723zg/nucleo_h723zg.dts (Zephyr `main`)
+ * now that MCLK claims a seventh pin. Enabled nodes there take:
+ *
+ *   Ethernet   PA1 PA2 PA7 PB13 PC1 PC4 PC5 PG11 PG13
+ *   USB OTG HS PA11 PA12
+ *   LEDs       PB0 PE1 PB14   (PB14 is also tim12/pwm12 ch1)
+ *   button     PC13
+ *   usart3     PD8 PD9        (the console)
+ *   usart2     PD5 PD6
+ *   lpuart1    PB6 PB7
+ *   spi1       PA5 PA6 PB5    (chip select PD14)
+ *   i2c1       PB8 PB9        (kept, and used below as the codec's control bus)
+ *   fdcan1     PD0 PD1
+ *   SWO        PB3
+ *
+ * The audio pins claimed here - PA4, PB10, PB12, PB15, PC6, PC10, PC11 -
+ * appear nowhere in that list, and none of them is on the Arduino R3 header
+ * map either, so nothing has to be given up. PC6 is `i2s2`'s only MCK group on
+ * this part (i2s3's only one is `i2s3_mck_pc7`, also free and unused), which
+ * is what settles MCLK onto the transmit block rather than the receive one.
+ *
+ * Note on the block-to-direction assignment: i2s2 has to be the transmitter.
+ * Its only two SDI candidates are spi2_miso_pb14 - the red LED, also driven
+ * by pwm12 - and spi2_miso_pc2_c, which is the dual-pad PC2_C (Arduino A4)
+ * and depends on the SYSCFG analog switch. i2s3 has both spi3_miso_pc11 and
+ * spi3_mosi_pc12 free, so it takes whichever direction is left.
+ *
+ * CONTROL BUS
+ * -----------
+ * The codec is programmed over I2C at 7-bit address 0x10, which is the fixed
+ * prefix 0010000 with CAD = 0 from SW502-2 (#43 §1.2). i2c1 is already enabled
+ * by the board on PB8/PB9 and is the `audio-ctrl-i2c` alias; the AKD4619 has
+ * no I2C header, so the two wires go to TP601 (SCL) and TP602 (SDA) with
+ * PORT601 left unplugged so the board's own USB controller stays off the bus.
+ *
+ * The pull-ups are on the evaluation board - R607/R608, 10 k to TVDD - so the
+ * STM32's internal bias is deliberately not enabled on top of them. The board
+ * default is I2C_BITRATE_FAST; this drops it to 100 kHz, which is the safer
+ * rate over flying leads to a pair of test points and is well inside the
+ * codec's 400 kHz maximum.
+ *
+ * DMA REACHABILITY AND CACHE ALIGNMENT - READ THIS BEFORE ADDING BUFFERS
+ * ---------------------------------------------------------------------
+ * The default `dmas` from stm32h7.dtsi put i2s2 TX on dmamux1 channel 0 and
+ * i2s3 RX on dmamux1 channel 1. dmamux1 channels 0..7 are served by dma1
+ * (dma-offset = 0, dma-requests = 8), which is why dma1 is enabled below and
+ * dma2 is not. The two channels are distinct, so the blocks do not collide -
+ * but they *would* if a future change enabled the opposite direction on
+ * either node, because both nodes default to the same channel pair.
+ *
+ * dma1 lives in the D2 domain and cannot address DTCM (0x20000000) or ITCM.
+ * Every buffer the I2S driver transfers from or into must therefore live in
+ * a region dma1 can see - the AXI SRAM at 0x24000000 that this board selects
+ * as `zephyr,sram` is fine; anything placed in DTCM via `__dtcm_bss_section`
+ * or a DTCM `zephyr,memory-region` is not, and fails silently.
+ *
+ * The driver also does its own cache maintenance around every transfer
+ * (sys_cache_data_flush_range() before TX, sys_cache_data_invd_range() after
+ * RX). Those operate on whole cache lines, so I2S block buffers must be
+ * aligned to the Cortex-M7 32-byte cache line *and* sized in whole multiples
+ * of it, or a flush/invalidate will corrupt whatever shares the end line.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/i2c/i2c.h>
+
+/ {
+	aliases {
+		i2s-tx = &i2s2;
+		i2s-rx = &i2s3;
+		audio-ctrl-i2c = &i2c1;
+		audio-codec = &ak4619;
+	};
+};
+
+&dma1 {
+	status = "okay";
+};
+
+&dmamux1 {
+	status = "okay";
+};
+
+/*
+ * The clock source. `mck-enabled` needs an mck pin listed in pinctrl-0, which
+ * is why i2s2_mck_pc6 is here and nowhere else.
+ */
+&i2s2 {
+	pinctrl-0 = <&i2s2_mck_pc6 &i2s2_ck_pb10 &i2s2_ws_pb12 &spi2_mosi_pb15>;
+	pinctrl-names = "default";
+	mck-enabled;
+	status = "okay";
+};
+
+/* The clock target: same BICK and LRCK wires, no MCLK of its own. */
+&i2s3 {
+	pinctrl-0 = <&i2s3_ck_pc10 &i2s3_ws_pa4 &spi3_miso_pc11>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * pinctrl and status repeat what nucleo_h723zg.dts already sets, so that this
+ * file describes the whole control path rather than half of it; the bitrate
+ * does not repeat it - see CONTROL BUS above.
+ */
+&i2c1 {
+	pinctrl-0 = <&i2c1_scl_pb8 &i2c1_sda_pb9>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	status = "okay";
+
+	ak4619: audio-codec@10 {
+		compatible = "asahi-kasei,ak4619";
+		reg = <0x10>;
+		status = "okay";
+	};
+};

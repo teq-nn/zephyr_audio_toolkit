@@ -1,10 +1,15 @@
 /*
  * Board suite for the I2S output sink node on the nucleo_h723zg target.
  *
- * Honest about what a board without a clock master can answer. The node is a
- * clock *target*: nothing moves until the codec clocks it, so this suite never
- * pulls a frame and makes no claim about transmitted audio, underrun recovery
- * or pacing - those need the AES3 link and belong to the loopback application.
+ * Honest about what a board with nothing wired to it can answer. The node
+ * configures itself as a clock *target* (AUDIO_I2S_OUT_TX_OPTIONS), so this
+ * suite never pulls a frame and makes no claim about transmitted audio,
+ * underrun recovery or pacing - those need a clocked link and belong to the
+ * loopback application. Note that the board overlay now makes the transmit
+ * block the clock *source* (#43, #44): the peripheral can drive MCLK/BICK/LRCK
+ * even though this node does not ask it to. Closing that gap - a sink that
+ * configures itself as the controller - belongs to the loopback application
+ * too, not here.
  *
  * What it does answer is everything that is decided before the first bit
  * leaves: the build-time assertions below fail CI if the transfer blocks stop
@@ -58,14 +63,15 @@ BUILD_ASSERT(DT_NODE_HAS_STATUS_OKAY(I2S_TX_NODE),
 	     "the i2s-tx alias must resolve to an enabled node");
 
 /*
- * The codec owns the clocks. The absence of mck-enabled keeps the devicetree
- * honest about that; AUDIO_I2S_OUT_TX_OPTIONS keeps the driver configuration
- * honest about it, and being exactly the two target bits is the stronger claim
- * - the controller constants are zero, so an option word that had lost a bit
- * would silently mean "controller" rather than fail.
+ * The AK4619 has no clock output, so the transmit block owns the clocks and
+ * drives MCLK (docs/hardware/akd4619-evaluation-board.md §2). What this node
+ * asks the driver for is a separate question, and AUDIO_I2S_OUT_TX_OPTIONS is
+ * still the two target bits - being exactly those two is the stronger claim,
+ * since the controller constants are zero and an option word that had lost a
+ * bit would silently mean "controller" rather than fail.
  */
-BUILD_ASSERT(!DT_PROP(I2S_TX_NODE, mck_enabled),
-	     "the transmit block must not drive MCLK: the codec is the clock master");
+BUILD_ASSERT(DT_PROP(I2S_TX_NODE, mck_enabled),
+	     "the transmit block must drive MCLK: the codec has no clock output");
 BUILD_ASSERT(AUDIO_I2S_OUT_TX_OPTIONS == (I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT_CLK_TARGET),
 	     "the sink must configure both clocks as targets and nothing else");
 

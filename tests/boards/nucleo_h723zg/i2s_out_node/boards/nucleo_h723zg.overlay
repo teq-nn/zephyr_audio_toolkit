@@ -1,12 +1,14 @@
 /*
- * The board's audio configuration is the smoke test's overlay, included rather
- * than copied: it is the canonical description of this target (the pin choices,
- * the TX/RX block split and the DMA reachability constraint), and two copies of
- * it would be two things to keep in step. Zephyr's board-overlay lookup finds
- * this file by name, and the preprocessor resolves the quoted path relative to
- * it.
+ * The board's audio configuration lives in dts/boards/nucleo_h723zg.overlay at
+ * the repository root, included rather than copied: it is the canonical
+ * description of this target (the pin choices, the TX/RX block split, the
+ * clock roles, the codec on the control bus and the DMA reachability
+ * constraint), and two copies of it would be two things to keep in step. It
+ * sits outside both tests/ and samples/ so that neither includes it by
+ * reaching into the other. Zephyr's board-overlay lookup finds this file by
+ * name, and the preprocessor resolves the quoted path relative to it.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "../../i2s_smoke/boards/nucleo_h723zg.overlay"
+#include "../../../../../dts/boards/nucleo_h723zg.overlay"

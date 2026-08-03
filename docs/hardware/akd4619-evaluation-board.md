@@ -224,7 +224,9 @@ The `PORT401` side of the buffers runs at `D3318V`, which `JP706` selects as
 
 ### 3.2 Mapping against the STM32 pins the overlay already uses
 
-Existing overlay: `tests/boards/nucleo_h723zg/i2s_smoke/boards/nucleo_h723zg.overlay`.
+Existing overlay: `tests/boards/nucleo_h723zg/i2s_smoke/boards/nucleo_h723zg.overlay` when this was
+written; #44 promoted it to `dts/boards/nucleo_h723zg.overlay`, which both `tests/` and `samples/`
+include.
 
 | `PORT401` pin | Signal | STM32 pin | pinctrl group | Block | Status |
 | --- | --- | --- | --- | --- | --- |

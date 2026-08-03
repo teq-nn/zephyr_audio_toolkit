@@ -1,0 +1,33 @@
+# Minimal binding for the AKM AK4619VN audio codec.
+#
+# It exists so that the codec node in dts/boards/nucleo_h723zg.overlay has
+# something to bind to, and describes only what issue #44 knows: the part sits
+# on an I2C bus at a 7-bit address. Issue #45 owns this file and fills in the
+# properties its driver needs - reset behaviour, the audio interface format,
+# the analog routing. It should extend this file rather than add a second
+# binding for the same compatible somewhere else.
+#
+# The vendor prefix is `asahi-kasei`, the one Zephyr's
+# dts/bindings/vendor-prefixes.txt registers for Asahi Kasei Corp. `akm` is not
+# a registered prefix and would draw an unknown-vendor warning.
+#
+# The module root is on DTS_ROOT (zephyr/module.yml, `settings: dts_root: .`),
+# so every consumer of the shared overlay finds this file without listing it.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  AKM AK4619VN 4-channel 32-bit 192 kHz audio CODEC.
+
+  MCLK, BICK and LRCK are inputs: the part has no PLL and cannot master the
+  audio clocks, so the host is always the clock source. See
+  docs/hardware/akd4619-evaluation-board.md for the AKD4619-A evaluation board
+  this is wired against.
+
+compatible: "asahi-kasei,ak4619"
+
+include: i2c-device.yaml
+
+properties:
+  reg:
+    required: true

@@ -135,8 +135,8 @@ The rule for any node that hands a buffer to a DMA-driven driver:
   is 32 bytes, so a buffer that is unaligned, or whose length is not a multiple of the line, lets a
   flush or invalidate clobber whatever shares its first or last line.
 
-The board overlay at `tests/boards/nucleo_h723zg/i2s_smoke/boards/nucleo_h723zg.overlay` repeats
-this next to the DMA nodes it applies to.
+The board overlay at `dts/boards/nucleo_h723zg.overlay` repeats this next to the DMA nodes it
+applies to.
 
 ---
 
@@ -227,9 +227,16 @@ The implementation follows the layout defined in the specification:
 
 ```
 zephyr-audio-pipeline/
-├─ zephyr/module.yml      # module manifest; Zephyr only looks here
+├─ zephyr/module.yml      # module manifest; Zephyr only looks here. dts_root: .
 ├─ CMakeLists.txt
 ├─ Kconfig
+├─ dts/
+│  ├─ boards/
+│  │  └─ nucleo_h723zg.overlay   # canonical board overlay: I2S pinout and clock roles,
+│  │                             # the codec on the control I2C bus, dma1/dmamux1.
+│  │                             # Outside tests/ and samples/ so both include it.
+│  └─ bindings/audio/
+│     └─ asahi-kasei,ak4619.yaml # minimal codec binding; the driver ticket fills it in
 ├─ include/zephyr/audio/
 │  ├─ audio_format.h
 │  ├─ audio_node.h
@@ -316,25 +323,27 @@ zephyr-audio-pipeline/
    │  ├─ prj.conf
    │  ├─ testcase.yaml           # platform_allow: nucleo_h723zg, so native_sim filters it out
    │  ├─ boards/
-   │  │  └─ nucleo_h723zg.overlay  # two slave I2S blocks (i2s2 TX, i2s3 RX) + dma1/dmamux1
+   │  │  └─ nucleo_h723zg.overlay  # includes dts/boards/nucleo_h723zg.overlay, nothing else
    │  └─ test_i2s_smoke.c        # both I2S devices and the control I2C come up ready
    ├─ i2s_in_node/               # the I2S source on real silicon; no frame is pulled
    │  ├─ CMakeLists.txt
    │  ├─ prj.conf
    │  ├─ testcase.yaml
    │  ├─ boards/
-   │  │  └─ nucleo_h723zg.overlay  # includes the smoke test's overlay rather than copying it
+   │  │  └─ nucleo_h723zg.overlay  # includes the canonical overlay rather than copying it
    │  └─ test_i2s_in_node.c      # block DMA reachability/alignment, clock role, open/close
    └─ i2s_out_node/              # the I2S sink on real silicon; no frame is pulled
       ├─ CMakeLists.txt
       ├─ prj.conf
       ├─ testcase.yaml
       ├─ boards/
-      │  └─ nucleo_h723zg.overlay  # includes the smoke test's overlay rather than copying it
+      │  └─ nucleo_h723zg.overlay  # includes the canonical overlay rather than copying it
       └─ test_i2s_out_node.c     # block DMA reachability/alignment, clock role, open/close
 ```
 
-`tests/boards/nucleo_h723zg/i2s_smoke/boards/nucleo_h723zg.overlay` is the one place the board's
-audio pinout, the TX/RX block split and the DMA reachability constraint are written down; hardware
-work reuses that overlay rather than restating it.
+`dts/boards/nucleo_h723zg.overlay` is the one place the board's audio pinout, the TX/RX block
+split, the clock roles and the DMA reachability constraint are written down; hardware work under
+both `tests/` and `samples/` includes that overlay rather than restating it, and neither tree has
+to reach into the other to find it. The wiring it describes is derived in
+`docs/hardware/akd4619-evaluation-board.md`.
 This document is our shared engineering contract.
