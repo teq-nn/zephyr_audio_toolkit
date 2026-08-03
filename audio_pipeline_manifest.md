@@ -152,6 +152,10 @@ this next to the DMA nodes it applies to.
 - `-EPIPE` is **reserved** for this end-of-stream signal inside the pipeline. No node may report it
   as a failure: every boundary an error can enter through - an upstream node, a filesystem, the sink
   itself - remaps it to `-EIO`, so a broken node can never masquerade as a finished track.
+- **A source that cannot end never reports EOF.** A live capture - the I2S input source - is clocked
+  continuously, so a read that produced nothing means the transport failed, not that the music
+  stopped. Such a source maps every failure it meets to an error return and never to an empty
+  frame, because an empty frame would park the worker and report a broken wire as a clean track end.
 
 ---
 
@@ -248,6 +252,7 @@ zephyr-audio-pipeline/
 │      ├─ file_reader_node.c
 │      ├─ file_writer_node.c
 │      ├─ gain_filter_node.c
+│      ├─ i2s_in_node.c
 │      ├─ i2s_out_node.c
 │      ├─ null_sink_node.c
 │      └─ tone_gen_node.c
@@ -277,12 +282,23 @@ zephyr-audio-pipeline/
    │  ├─ test_file_reader.c          # WAV source, S16→S32 widening
    │  ├─ test_file_writer.c          # WAV sink, S32→S16 truncation
    │  └─ test_tone_gen.c             # tone source: frequency, phase, duration
+   ├─ i2s_in_node/               # the I2S source against a scriptable device, no hardware
+   │  ├─ CMakeLists.txt
+   │  ├─ prj.conf
+   │  ├─ testcase.yaml
+   │  ├─ app.overlay             # two vnd,i2s-fake controllers, one per node instance
+   │  ├─ dts/bindings/
+   │  │  └─ vnd,i2s-fake.yaml
+   │  ├─ fake_i2s.h              # scriptable I2S device: timeouts, failures, overrun
+   │  ├─ fake_i2s.c
+   │  └─ test_i2s_in_node.c      # failure is never EOF, block ownership, overrun recovery
    ├─ i2s_wire/                  # container <-> wire arithmetic, no I2S device needed
    │  ├─ CMakeLists.txt
    │  ├─ prj.conf
    │  ├─ testcase.yaml
    │  └─ test_i2s_wire.c
-   ├─ no_file_nodes/             # node selection: file nodes off, FILE_SYSTEM stays out
+   ├─ no_file_nodes/             # node selection: file and I2S nodes off, neither
+   │                             # FILE_SYSTEM nor I2S is dragged in
    │  ├─ CMakeLists.txt
    │  ├─ prj.conf
    │  ├─ testcase.yaml
@@ -300,6 +316,13 @@ zephyr-audio-pipeline/
    │  ├─ boards/
    │  │  └─ nucleo_h723zg.overlay  # two slave I2S blocks (i2s2 TX, i2s3 RX) + dma1/dmamux1
    │  └─ test_i2s_smoke.c        # both I2S devices and the control I2C come up ready
+   ├─ i2s_in_node/               # the I2S source on real silicon; no frame is pulled
+   │  ├─ CMakeLists.txt
+   │  ├─ prj.conf
+   │  ├─ testcase.yaml
+   │  ├─ boards/
+   │  │  └─ nucleo_h723zg.overlay  # includes the smoke test's overlay rather than copying it
+   │  └─ test_i2s_in_node.c      # block DMA reachability/alignment, clock role, open/close
    └─ i2s_out_node/              # the I2S sink on real silicon; no frame is pulled
       ├─ CMakeLists.txt
       ├─ prj.conf

@@ -177,6 +177,7 @@ int audio_pipeline_get_event(struct audio_pipeline *pl, struct audio_pipeline_ev
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_READER` | Build the file reader source; selects `FILE_SYSTEM`. |
 | `CONFIG_AUDIO_PIPELINE_NODE_FILE_WRITER` | Build the file writer sink; selects `FILE_SYSTEM`. |
 | `CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER` | Build the gain filter. |
+| `CONFIG_AUDIO_PIPELINE_NODE_I2S_IN` | Build the I2S input source; selects `I2S`. Never reports EOF: a live input has no end. |
 | `CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT` | Build the I2S output sink; selects `I2S`. |
 | `CONFIG_AUDIO_PIPELINE_NODE_NULL_SINK` | Build the null sink. |
 | `CONFIG_AUDIO_PIPELINE_NODE_TONE_GEN` | Build the tone generator source. |
@@ -206,13 +207,15 @@ zephyr-audio-pipeline/
 ├─ subsys/audio/pipeline/                   # core, config, events, node core, audio_internal.h,
 │  │                                        # audio_wav.c (RIFF/WAVE header read + write),
 │  │                                        # audio_i2s_wire.c (container <-> I2S wire words)
-│  └─ nodes/                                # file_reader, file_writer, gain_filter, i2s_out,
-│                                           # null_sink, tone_gen
+│  └─ nodes/                                # file_reader, file_writer, gain_filter, i2s_in,
+│                                           # i2s_out, null_sink, tone_gen
 ├─ samples/audio/pipeline_basic/            # CMakeLists.txt, Kconfig, src/main.c
 ├─ tests/subsys/audio/pipeline/             # test_roundtrip.c, test_error_paths.c
 ├─ tests/subsys/audio/i2s_wire/             # test_i2s_wire.c, no I2S device needed
+├─ tests/subsys/audio/i2s_in_node/          # the I2S source against a scriptable fake device
 ├─ tests/subsys/audio/wav/                  # test_wav.c, standalone header unit test
-└─ tests/boards/nucleo_h723zg/              # i2s_smoke, i2s_out_node; pinned with platform_allow
+└─ tests/boards/nucleo_h723zg/              # i2s_smoke, i2s_in_node, i2s_out_node; pinned
+                                            # with platform_allow
 ```
 
 ## 11. Out of scope for v1 (spec §1.3, §13)

@@ -1,12 +1,14 @@
 /*
- * Node selection: what an image gets when the file nodes are switched off.
+ * Node selection: what an image gets when the nodes with dependencies are
+ * switched off.
  *
- * Every node the subsystem ships is its own Kconfig symbol, and the two file
- * nodes are the only ones that select FILE_SYSTEM. This suite is the other end
- * of that range from tests/subsys/audio/pipeline, which enables all four: here
- * only the gain filter and the null sink are built, and the suite checks both
- * halves of the claim - that the filesystem stays out of the image, and that a
- * pipeline made of the remaining nodes still runs.
+ * Every node the subsystem ships is its own Kconfig symbol, and a node's
+ * dependencies belong to that symbol: the two file nodes are the only ones that
+ * select FILE_SYSTEM, and the two I2S nodes are the only ones that select I2S.
+ * This suite is the other end of that range from tests/subsys/audio/pipeline:
+ * here only the gain filter and the null sink are built, and the suite checks
+ * both halves of the claim - that neither subsystem is dragged into the image,
+ * and that a pipeline made of the remaining nodes still runs.
  *
  * The chain is driven by a scripted source defined in this file rather than by
  * the shared fakes next door, so the suite depends on nothing that could quietly
@@ -37,6 +39,8 @@
  */
 BUILD_ASSERT(!IS_ENABLED(CONFIG_FILE_SYSTEM),
 	     "prj.conf enables no file node, so nothing may select FILE_SYSTEM");
+BUILD_ASSERT(!IS_ENABLED(CONFIG_I2S),
+	     "prj.conf enables no I2S node, so nothing may select I2S");
 
 #define TEST_SOURCE_FRAMES 3U
 #define TEST_SOURCE_SAMPLE 1000
@@ -199,6 +203,14 @@ ZTEST(audio_pipeline_no_file_nodes, test_config_file_system_stays_out)
 {
 	zassert_false(IS_ENABLED(CONFIG_FILE_SYSTEM),
 		      "FILE_SYSTEM is set although no file node is enabled");
+}
+
+/* The same claim for the other subsystem a node selects, so an image that wires
+ * up neither I2S node carries no I2S driver layer either.
+ */
+ZTEST(audio_pipeline_no_file_nodes, test_config_i2s_stays_out)
+{
+	zassert_false(IS_ENABLED(CONFIG_I2S), "I2S is set although no I2S node is enabled");
 }
 
 ZTEST(audio_pipeline_no_file_nodes, test_sink_runs_without_file_nodes)

@@ -34,7 +34,7 @@
 #include <zephyr/fs/fs.h>
 #endif
 
-#ifdef CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT
+#if defined(CONFIG_AUDIO_PIPELINE_NODE_I2S_IN) || defined(CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT)
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/i2s.h>
@@ -257,7 +257,7 @@ extern const struct audio_node_ops gain_filter_node_ops;
 #endif /* CONFIG_AUDIO_PIPELINE_NODE_GAIN_FILTER */
 
 /* -------------------------------------------------------------------------
- * I2S output sink node
+ * I2S transfer blocks, shared by both I2S nodes
  * -------------------------------------------------------------------------
  */
 
@@ -266,10 +266,16 @@ extern const struct audio_node_ops gain_filter_node_ops;
  *
  * Static allocation says how much memory a node gets, not where or how it is
  * shaped, and a DMA-driven I2S driver cares about both (manifest §6). The
- * drivers this node targets do their own cache maintenance around every
- * transfer - @c sys_cache_data_flush_range() before TX - and that acts on whole
- * cache lines, so a block that is not line aligned *and* line sized lets a
- * flush clobber whatever shares its first or last line.
+ * drivers these nodes target do their own cache maintenance around every
+ * transfer - @c sys_cache_data_flush_range() before TX,
+ * @c sys_cache_data_invd_range() after RX - and that acts on whole cache lines,
+ * so a block that is not line aligned *and* line sized lets a flush or an
+ * invalidate clobber whatever shares its first or last line.
+ *
+ * The rule is identical in both directions, which is why it is stated once here
+ * rather than per node: an invalidate that discards a neighbour's dirty line on
+ * the receive side is the same defect as a flush that overwrites it on the
+ * transmit side.
  *
  * The floor of 32 is the Cortex-M7 line of the first hardware target. It is
  * kept even where the line is smaller or where there is no cache at all,
@@ -284,9 +290,9 @@ extern const struct audio_node_ops gain_filter_node_ops;
  * STM32H7 - needs the slab relocated, not merely realigned.
  */
 #if defined(CONFIG_DCACHE_LINE_SIZE) && (CONFIG_DCACHE_LINE_SIZE > 32)
-#define AUDIO_I2S_OUT_BLOCK_ALIGN CONFIG_DCACHE_LINE_SIZE
+#define AUDIO_I2S_BLOCK_ALIGN CONFIG_DCACHE_LINE_SIZE
 #else
-#define AUDIO_I2S_OUT_BLOCK_ALIGN 32
+#define AUDIO_I2S_BLOCK_ALIGN 32
 #endif
 
 /**
@@ -295,7 +301,7 @@ extern const struct audio_node_ops gain_filter_node_ops;
  * Sized from the frame capacity the pipeline hands the node and never from
  * @kconfig{CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES}: the block has to hold what
  * arrives in a frame, and whether that Kconfig symbol counts total or
- * per-channel samples is not this node's question to answer (issue #23). The
+ * per-channel samples is not a node's question to answer (issue #23). The
  * application passes the same figure it gave AUDIO_PIPELINE_DEFINE(), so a
  * change of meaning there moves both allocations together.
  *
@@ -304,10 +310,138 @@ extern const struct audio_node_ops gain_filter_node_ops;
  * has to be a constant. Sizing for the widest word the container can ever
  * produce is what keeps every definition site correct when the wire seam grows
  * a depth.
+ *
+ * On the receive side the same figure is an upper bound rather than an exact
+ * fit: a block sized for the widest word carries more of the narrower ones than
+ * one frame can hold, so the source drains a block across as many frames as it
+ * takes instead of dropping the surplus.
  */
-#define AUDIO_I2S_OUT_BLOCK_BYTES(_frame_samples)                                                  \
-	ROUND_UP((size_t)(_frame_samples) * AUDIO_I2S_WIRE_MAX_WORD_BYTES,                         \
-		 AUDIO_I2S_OUT_BLOCK_ALIGN)
+#define AUDIO_I2S_BLOCK_BYTES(_frame_samples)                                                      \
+	ROUND_UP((size_t)(_frame_samples) * AUDIO_I2S_WIRE_MAX_WORD_BYTES, AUDIO_I2S_BLOCK_ALIGN)
+
+/* -------------------------------------------------------------------------
+ * I2S input source node
+ * -------------------------------------------------------------------------
+ */
+
+#ifdef CONFIG_AUDIO_PIPELINE_NODE_I2S_IN
+
+/**
+ * @brief Clock role the source configures, fixed at target (slave).
+ *
+ * The same statement ::AUDIO_I2S_OUT_TX_OPTIONS makes for the transmit side,
+ * and made again here because the two directions are configured by two
+ * independent @c i2s_configure() calls - on this hardware even on two different
+ * peripherals - so each one carries its own assertion.
+ *
+ * @c I2S_OPT_BIT_CLK_CONTROLLER and @c I2S_OPT_FRAME_CLK_CONTROLLER are zero
+ * bits, so "controller" is not a value this node could pass by accident; it is
+ * the absence of the two below, and they are always present. There is
+ * deliberately no Kconfig option to drop them.
+ */
+#define AUDIO_I2S_IN_RX_OPTIONS (I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT_CLK_TARGET)
+
+/** @brief Per-instance state of the I2S input source node. */
+struct audio_i2s_in_state {
+	/** I2S device, resolved from devicetree by the definition macro. */
+	const struct device *dev;
+	/**
+	 * Receive blocks the driver fills, owned by the definition macro. Per
+	 * instance, so two sources never take blocks from the same slab.
+	 */
+	struct k_mem_slab *slab;
+	/** Bytes in one @ref slab block, owned by the definition macro. */
+	size_t block_bytes;
+
+	/*
+	 * Everything below belongs to the node implementation. It is only
+	 * meaningful between a successful open() and the matching close(), and
+	 * an application must treat it as read-only.
+	 *
+	 * There is deliberately no sample rate and no channel count here: they
+	 * are pipeline-wide, owned by the pipeline, and read from
+	 * audio_node.pipeline_format wherever they are needed (manifest §4).
+	 */
+
+	/** True once open() has configured the receive direction. */
+	bool configured;
+	/** True while the receive direction has been started and not stopped. */
+	bool started;
+	/**
+	 * Block taken from @ref slab and not yet handed back, or NULL.
+	 *
+	 * A block holds whatever the driver was told to receive, which may be
+	 * more than one frame carries, so it is drained across several
+	 * process() calls and only then returned. It is the node's own property
+	 * for as long as it is set here - i2s_read() passed ownership - which is
+	 * why close() and every error path release it explicitly.
+	 */
+	void *block;
+	/** Valid bytes in @ref block, as reported by the driver. */
+	size_t block_valid;
+	/** Bytes of @ref block already widened into frames. */
+	size_t block_used;
+};
+
+extern const struct audio_node_ops i2s_in_node_ops;
+
+/**
+ * @brief Statically define an I2S input source node.
+ *
+ * File scope only. Allocates the node, its ::audio_i2s_in_state **and its
+ * @c k_mem_slab**, so two instances never receive into the same memory.
+ * Needs @kconfig{CONFIG_AUDIO_PIPELINE_NODE_I2S_IN}.
+ *
+ * The device comes from devicetree rather than from a name looked up at run
+ * time, so a chain wired to a peripheral the board does not have fails to build
+ * instead of failing to start.
+ *
+ * A source has no upstream, so unlike the sink macro this one takes none.
+ *
+ * @param _name          Symbol name of the @ref audio_node instance.
+ * @param _node_id       Devicetree node identifier of the I2S device, e.g.
+ *                       @c DT_ALIAS(i2s_rx). Must be @c okay.
+ * @param _frame_samples Frame capacity the pipeline hands this node, in total
+ *                       interleaved samples - the same figure passed to
+ *                       AUDIO_PIPELINE_DEFINE(). Sizes the receive blocks; a
+ *                       block holding more than one frame is drained across
+ *                       several frames rather than truncated.
+ * @param _blocks        Receive blocks to allocate. The I2S API needs at least
+ *                       two per queue; more of them buys tolerance against a
+ *                       late consumer - an overrun - at the cost of latency.
+ */
+#define AUDIO_I2S_IN_NODE_DEFINE(_name, _node_id, _frame_samples, _blocks)                         \
+	BUILD_ASSERT(DT_NODE_HAS_STATUS_OKAY(_node_id),                                            \
+		     "AUDIO_I2S_IN_NODE_DEFINE(" #_name "): " #_node_id                            \
+		     " is not an enabled devicetree node");                                        \
+	BUILD_ASSERT((_frame_samples) >= 2,                                                        \
+		     "AUDIO_I2S_IN_NODE_DEFINE(" #_name "): frame_samples is the TOTAL "           \
+		     "interleaved sample count and must hold at least one stereo sample "          \
+		     "set (>= 2), like AUDIO_PIPELINE_DEFINE()");                                  \
+	BUILD_ASSERT((_blocks) >= 2,                                                               \
+		     "AUDIO_I2S_IN_NODE_DEFINE(" #_name "): the I2S API needs at least "           \
+		     "two receive blocks per queue");                                              \
+	K_MEM_SLAB_DEFINE_STATIC(_name##_slab, AUDIO_I2S_BLOCK_BYTES(_frame_samples), (_blocks),   \
+				 AUDIO_I2S_BLOCK_ALIGN);                                           \
+	static struct audio_i2s_in_state _name##_state = {                                         \
+		.dev = DEVICE_DT_GET(_node_id),                                                    \
+		.slab = &_name##_slab,                                                             \
+		.block_bytes = AUDIO_I2S_BLOCK_BYTES(_frame_samples),                              \
+	};                                                                                         \
+	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SOURCE, &i2s_in_node_ops, NULL, &_name##_state)
+
+#else /* CONFIG_AUDIO_PIPELINE_NODE_I2S_IN */
+
+#define AUDIO_I2S_IN_NODE_DEFINE(_name, _node_id, _frame_samples, _blocks)                         \
+	AUDIO_NODE_UNAVAILABLE(_name, AUDIO_NODE_ROLE_SOURCE, "AUDIO_I2S_IN_NODE_DEFINE",          \
+			       "AUDIO_PIPELINE_NODE_I2S_IN")
+
+#endif /* CONFIG_AUDIO_PIPELINE_NODE_I2S_IN */
+
+/* -------------------------------------------------------------------------
+ * I2S output sink node
+ * -------------------------------------------------------------------------
+ */
 
 #ifdef CONFIG_AUDIO_PIPELINE_NODE_I2S_OUT
 
@@ -316,8 +450,8 @@ extern const struct audio_node_ops gain_filter_node_ops;
  *
  * The codec is the clock master for the systems this node is built for; it owns
  * MCLK, BCK and LRCK, and a second device driving any of them is contention on
- * a shared wire. There is deliberately no counterpart to this macro and no
- * Kconfig option beside it: @c I2S_OPT_BIT_CLK_CONTROLLER and
+ * a shared wire. There is deliberately no controller counterpart to this macro
+ * and no Kconfig option beside it: @c I2S_OPT_BIT_CLK_CONTROLLER and
  * @c I2S_OPT_FRAME_CLK_CONTROLLER are zero bits, so "controller" is not a value
  * the node could pass by accident - it is the absence of the two below, and
  * they are always present.
@@ -392,12 +526,12 @@ extern const struct audio_node_ops i2s_out_node_ops;
 	BUILD_ASSERT((_blocks) >= 2,                                                               \
 		     "AUDIO_I2S_OUT_NODE_DEFINE(" #_name "): the I2S API needs at least "          \
 		     "two transfer blocks per queue");                                             \
-	K_MEM_SLAB_DEFINE_STATIC(_name##_slab, AUDIO_I2S_OUT_BLOCK_BYTES(_frame_samples),          \
-				 (_blocks), AUDIO_I2S_OUT_BLOCK_ALIGN);                            \
+	K_MEM_SLAB_DEFINE_STATIC(_name##_slab, AUDIO_I2S_BLOCK_BYTES(_frame_samples), (_blocks),   \
+				 AUDIO_I2S_BLOCK_ALIGN);                                           \
 	static struct audio_i2s_out_state _name##_state = {                                        \
 		.dev = DEVICE_DT_GET(_node_id),                                                    \
 		.slab = &_name##_slab,                                                             \
-		.block_bytes = AUDIO_I2S_OUT_BLOCK_BYTES(_frame_samples),                          \
+		.block_bytes = AUDIO_I2S_BLOCK_BYTES(_frame_samples),                              \
 	};                                                                                         \
 	AUDIO_NODE_DEFINE(_name, AUDIO_NODE_ROLE_SINK, &i2s_out_node_ops, (_upstream),             \
 			  &_name##_state)
