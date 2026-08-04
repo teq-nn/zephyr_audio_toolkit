@@ -717,9 +717,15 @@ extern const struct audio_node_ops null_sink_node_ops;
  * @brief In-band energy fraction a channel needs before its tone counts as
  *        present.
  *
- * A pure tone at the expected frequency reads ::AUDIO_TONE_ANALYZER_UNITY_Q15;
- * white noise of the same total energy reads @c 2/window of it, and a tone at
- * some other frequency reads its leakage into the bin, which is smaller still.
+ * A pure tone at the expected frequency reads at most
+ * ::AUDIO_TONE_ANALYZER_UNITY_Q15, and reaches it only when that frequency
+ * falls on a bin centre, i.e. when @c freq_hz * window is a whole multiple of
+ * @c sample_rate_hz. Off a bin centre the tone's own negative-frequency image
+ * leaks into the bin and the reading falls short by the scalloping loss of the
+ * offset - a fraction of a percent for a tone a few bins up, and a couple of
+ * percent in the first bin the node accepts at all. White noise of the same
+ * total energy reads @c 2/window of it, and a tone at some other frequency
+ * reads its leakage into the bin, which is smaller still.
  * Half is therefore not a knife edge between the two - it is the middle of a
  * gap of two orders of magnitude, and it leaves a real signal room for the
  * hum, the noise floor and the quantisation a link adds on the way.

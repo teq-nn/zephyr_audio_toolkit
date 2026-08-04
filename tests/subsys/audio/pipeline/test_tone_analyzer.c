@@ -200,6 +200,15 @@ AUDIO_TONE_GEN_NODE_DEFINE(ana_gen_low, AUDIO_TONE_GEN_FULL_SCALE_Q15, 0, ANA_LO
 AUDIO_TONE_ANALYZER_NODE_DEFINE(ana_low, &ana_gen_low, ANA_LONG_WINDOW, ANA_LOW_HZ);
 
 /*
+ * The same corner 40 dB down: the identical tone, window and frequency, only
+ * with the accumulators two orders of magnitude clear of anything they could
+ * wrap against. It is the control the full-scale reading above is compared to,
+ * because the reading on its own has no absolute value to be held to.
+ */
+AUDIO_TONE_GEN_NODE_DEFINE(ana_gen_low_quiet, ANA_QUIET_Q15, 0, ANA_LOW_HZ);
+AUDIO_TONE_ANALYZER_NODE_DEFINE(ana_low_quiet, &ana_gen_low_quiet, ANA_LONG_WINDOW, ANA_LOW_HZ);
+
+/*
  * One captured window, replayed through the shared scripted source. The
  * generator only ever hands out whole interleaved sample sets, so replaying its
  * output in odd sized pieces is the only way to hand the analyzer a frame that
@@ -249,7 +258,8 @@ static struct audio_node *const stereo_nodes[] = {
 	&ana_replay_src,  &ana_replay_sink,
 };
 
-static struct audio_node *const mono_nodes[] = {&ana_gen_low, &ana_low, &ana_dc, &ana_nyquist};
+static struct audio_node *const mono_nodes[] = {&ana_gen_low,   &ana_low, &ana_gen_low_quiet,
+						&ana_low_quiet, &ana_dc,  &ana_nyquist};
 
 /* A frame of a few hundred samples has no business on the Ztest stack. */
 static int32_t ana_frame[CONFIG_AUDIO_PIPELINE_FRAME_SAMPLES];
@@ -587,8 +597,11 @@ ZTEST(audio_pipeline_tone_analyzer, test_sink_prefers_a_quiet_right_tone_to_a_lo
 
 ZTEST(audio_pipeline_tone_analyzer, test_sink_full_scale_does_not_overflow_the_accumulators)
 {
-	struct audio_tone_analyzer_result result;
+	struct audio_tone_analyzer_result loud;
+	struct audio_tone_analyzer_result quiet;
 	int64_t state_max;
+	int32_t lowest;
+	int32_t highest;
 
 	/*
 	 * The arithmetic first, as the node states it: the Goertzel state is
@@ -608,21 +621,66 @@ ZTEST(audio_pipeline_tone_analyzer, test_sink_full_scale_does_not_overflow_the_a
 	 * Then the measurement, at the configuration that reaches it: full
 	 * scale, the longest window the node supports and the lowest frequency
 	 * it accepts there. A wrapped accumulator does not announce itself - it
-	 * reports a magnitude that is merely wrong - so what this asserts is
-	 * that the tone is still measured as a full one.
+	 * reports a magnitude that is merely wrong - so the fault has to be
+	 * caught by a property of the reading rather than by the reading itself.
+	 *
+	 * It cannot be caught by an absolute in-band fraction, and it is worth
+	 * saying why, because "a full-scale tone must read full scale" is the
+	 * obvious thing to write here and it is wrong. 12 Hz over 4096 samples
+	 * at 48 kHz is 1.024 cycles per window - deliberately just off a bin
+	 * centre, because open() refuses anything closer to DC, and a whole
+	 * number of bins is not reachable at an integer frequency this low. The
+	 * tone's own negative-frequency image therefore leaks into the bin, and
+	 * the in-band fraction lands about 2 % under unity in exact arithmetic
+	 * before a single bit is rounded. That is scalloping loss, not lost
+	 * bits, and no implementation can be asked to beat it.
+	 *
+	 * The property that does separate the two is proportionality. The
+	 * reading is a ratio of energies, so scaling the input scales numerator
+	 * and denominator alike and the fraction does not move - scalloping loss
+	 * included, because it is a property of the frequency and the window and
+	 * not of the level. A wrapped accumulator has no such invariance: a
+	 * magnitude folded back through int64_t bears no fixed relation to the
+	 * energy it is divided by, so it moves the loud reading and leaves the
+	 * quiet one alone. Measuring the same tone twice, once at full scale and
+	 * once at a hundredth of it where nothing can wrap, therefore asks the
+	 * overflow question directly and cancels everything that is not overflow.
 	 */
-	ana_measure(&ana_gen_low, &ana_low, ANA_LONG_WINDOW, 1U, 1U, &result);
+	ana_measure(&ana_gen_low, &ana_low, ANA_LONG_WINDOW, 1U, 1U, &loud);
+	ana_measure(&ana_gen_low_quiet, &ana_low_quiet, ANA_LONG_WINDOW, 1U, 1U, &quiet);
 
-	zassert_equal(result.verdict, AUDIO_TONE_ANALYZER_VERDICT_PASS,
-		      "full scale over the longest window was reported as %d",
-		      (int)result.verdict);
-	zassert_true(result.channel[0].in_band_q15[0] >
-			     AUDIO_TONE_ANALYZER_UNITY_Q15 - AUDIO_TONE_ANALYZER_UNITY_Q15 / 100,
-		     "a full-scale tone read %d of %d in band, which is what a wrapped "
-		     "accumulator looks like",
-		     result.channel[0].in_band_q15[0], AUDIO_TONE_ANALYZER_UNITY_Q15);
-	zassert_true(result.channel[0].rms > 20000, "a full-scale tone has an RMS of only %d",
-		     result.channel[0].rms);
+	zassert_equal(loud.verdict, AUDIO_TONE_ANALYZER_VERDICT_PASS,
+		      "full scale over the longest window was reported as %d", (int)loud.verdict);
+	zassert_equal(quiet.verdict, AUDIO_TONE_ANALYZER_VERDICT_PASS,
+		      "the same tone 40 dB down was reported as %d, so it is no control",
+		      (int)quiet.verdict);
+
+	lowest = MIN(loud.channel[0].in_band_q15[0], quiet.channel[0].in_band_q15[0]);
+	highest = MAX(loud.channel[0].in_band_q15[0], quiet.channel[0].in_band_q15[0]);
+
+	/* 1 % of the reading, which is not a round number picked for looking
+	 * safe. What is left between the two once the ratio has cancelled the
+	 * amplitude is the quantisation the quiet stimulus carries, 40 dB closer
+	 * to the least significant bit than the loud one: measured, the two sit
+	 * about 0.05 % apart, so this leaves a factor of twenty. On the other
+	 * side, the mildest wrap there is - one bit too few in the recurrence
+	 * state at this corner - moves the full-scale reading by around 2 %,
+	 * because the state is some thirty-six bits wide here and folding its
+	 * top bit away changes the magnitude by a lot more than the ratio's
+	 * own noise. 1 % sits between those two with room either way.
+	 */
+	zassert_true((int64_t)(highest - lowest) * 100 <= (int64_t)highest,
+		     "the same tone read %d of %d in band at full scale and %d at a hundredth "
+		     "of it; the fraction is amplitude invariant unless an accumulator wrapped",
+		     loud.channel[0].in_band_q15[0], AUDIO_TONE_ANALYZER_UNITY_Q15,
+		     quiet.channel[0].in_band_q15[0]);
+
+	zassert_true(loud.channel[0].rms > 20000, "a full-scale tone has an RMS of only %d",
+		     loud.channel[0].rms);
+	zassert_true(quiet.channel[0].rms < loud.channel[0].rms / 10,
+		     "the control (RMS %d) is not much quieter than full scale (RMS %d), so it "
+		     "does not put the accumulators anywhere they could not wrap",
+		     quiet.channel[0].rms, loud.channel[0].rms);
 }
 
 /* -------------------------------------------------------------------------
