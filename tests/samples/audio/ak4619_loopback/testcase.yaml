@@ -1,14 +1,22 @@
-# The codec driver on a host, against an emulated part. There is no
-# platform_allow: the whole point is that the suite needs neither an I2C
-# peripheral nor an evaluation board, so it runs wherever the rest of
-# scripts/ci-test.sh does. The suite lives under tests/samples/ because the
-# code it covers lives under samples/ - the driver ships with the sample, not
-# with the toolkit (issue #42).
+# The codec driver on a host, against an emulated part: the suite needs no
+# evaluation board, only an I2C controller with an emulator behind it. The
+# suite lives under tests/samples/ because the code it covers lives under
+# samples/ - the driver ships with the sample, not with the toolkit (#42).
+#
+# platform_allow is native_sim rather than nothing, because app.overlay hangs
+# the emulated part off `&i2c0` - a label native_sim declares and no STM32
+# does (an H7 has i2c1..i2c4). A board target therefore fails the suite in the
+# devicetree parser, before it can reach the code under test, which is a
+# result about the overlay rather than about the driver. The hardware path is
+# covered by samples/audio/ak4619_loopback, which uses the shared board
+# overlay and its `&i2c1`.
 tests:
   audio.samples.ak4619_loopback:
     tags:
       - audio
       - codec
       - i2c
+    platform_allow:
+      - native_sim
     integration_platforms:
       - native_sim

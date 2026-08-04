@@ -232,6 +232,13 @@ static const char *fraction_text(char *buf, size_t len, int32_t q15)
 {
 	uint32_t milli = (uint32_t)(((int64_t)q15 * 1000) / AUDIO_TONE_ANALYZER_UNITY_Q15);
 
+	/* The analyzer normalises against unity, so the ratio is 0.000 .. 1.000 and
+	 * two digits are all this ever prints. Saying so keeps the whole part
+	 * bounded for the compiler, which otherwise has to assume ten digits and
+	 * warns that FRACTION_TEXT_LEN cannot hold them.
+	 */
+	milli = MIN(milli, 9999U);
+
 	(void)snprintk(buf, len, "%u.%03u", milli / 1000U, milli % 1000U);
 
 	return buf;
