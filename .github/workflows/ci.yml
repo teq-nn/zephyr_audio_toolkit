@@ -110,8 +110,8 @@ jobs:
   # AKD4619-A on a runner, and sample.yaml marks the scenario `build_only` for
   # that reason. What this job catches is the class of breakage the native_sim
   # run cannot see at all: the shared board overlay, the codec binding and the
-  # driver that consumes them going out of step. tests/boards/ stays out of it;
-  # those suites are for a bench with a board attached.
+  # driver that consumes them going out of step. The Ztest suites have their
+  # own cross-build job below; this one stays pointed at samples/ alone.
   sample-build:
     name: sample build_only (nucleo_h723zg)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -152,5 +152,76 @@ jobs:
           path: |
             zephyr_audio_toolkit/twister-out-samples/twister.log
             zephyr_audio_toolkit/twister-out-samples/twister.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Cross-compiles the Ztest suites. This job exists to give the suites a
+  # memory budget: native_sim is a hosted process whose RAM is the host's, so
+  # the twister job above cannot notice a suite growing past anything an MCU
+  # could hold, and one had - audio.pipeline.core wanted 414,864 B of a board
+  # that has 327,680 (issue #48). Linking for a real part is the only thing
+  # that asks the question, because native_sim's devicetree has no `sram` node
+  # and arch/posix links against the host with no MEMORY regions at all, so no
+  # `region 'RAM' overflowed` diagnostic can ever be produced there. Nothing is
+  # executed here either: Twister has no hardware map on a runner, so every
+  # scenario stops after the link.
+  #
+  # This is a sibling of sample-build rather than an extension of it, although
+  # extending it would have been one env var. Three reasons for the split. The
+  # jobs answer different questions - one is "does the hardware sample still
+  # compile", the other is "do the suites still fit" - and as separate checks a
+  # red X names which. They fail on different people's changes, so separate
+  # artifacts (twister-out-samples and twister-out-tests) stay readable. And
+  # ci-test.sh's CI_TEST_PATH maps to a single `twister -T`; covering both from
+  # one job would mean teaching the script a multi-path convention for the sake
+  # of a single caller, when GitHub already runs the two in parallel for free.
+  #
+  # tests/boards/nucleo_h723zg/* is included, not excluded. Those suites do
+  # need a bench to *run* - they drive real I2S pins - but building them needs
+  # nothing but the toolchain, and building them is what catches an overlay or
+  # a binding drifting away from the driver. They had never been compiled in CI
+  # before this job; all three do, as does everything under tests/subsys.
+  # tests/samples/audio/ak4619_loopback filters itself out here, its
+  # testcase.yaml carrying `platform_allow: native_sim` because its overlay
+  # hangs the emulated codec off `&i2c0`, a label no STM32 declares.
+  tests-build:
+    name: tests build_only (nucleo_h723zg)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    env:
+      CI_TEST_PLATFORM: nucleo_h723zg
+      CI_TEST_PATH: tests
+      CI_TEST_OUTDIR: twister-out-tests
+    steps:
+      - name: Check out the module
+        uses: actions/checkout@v7
+        with:
+          path: zephyr_audio_toolkit
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Set up Zephyr workspace and SDK
+        uses: zephyrproject-rtos/action-zephyr-setup@v1.0.14
+        with:
+          app-path: zephyr_audio_toolkit
+          # Same Cortex-M7 target as sample-build, so the same toolchain.
+          toolchains: arm-zephyr-eabi
+
+      - name: Build the test suites
+        working-directory: zephyr_audio_toolkit
+        run: ./scripts/ci-test.sh
+
+      - name: Upload Twister results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: twister-out-tests
+          path: |
+            zephyr_audio_toolkit/twister-out-tests/twister.log
+            zephyr_audio_toolkit/twister-out-tests/twister.xml
           if-no-files-found: ignore
           retention-days: 7

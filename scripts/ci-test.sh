@@ -39,7 +39,8 @@
 #     (or run the 64-bit variant: CI_TEST_PLATFORM=native_sim/native/64).
 #
 # Exit status is Twister's: non-zero if any suite fails to build or any ztest
-# case fails, which is what gates merges.
+# case fails, which is what gates merges. See --overflow-as-errors below for
+# the one case where that was not true by default.
 #
 # SPDX-License-Identifier: Apache-2.0
 
@@ -79,6 +80,19 @@ else
 	extra_args+=("-x=ZEPHYR_EXTRA_MODULES=${repo_root}")
 fi
 
+# --overflow-as-errors is not a preference, it is a correctness fix. Without
+# it, a suite whose image does not fit the target's RAM or flash is reported as
+#
+#     nucleo_h723zg/stm32h723xx  audio.pipeline.core  SKIPPED (RAM overflow)
+#
+# and Twister exits 0 - a linker error that says `region 'RAM' overflowed by
+# 87184 bytes` is downgraded to a skip, so a run that hit it still went green
+# and a CI job that hit it would still merge. Twister's reasoning is that a
+# suite too big for a board is a suite that board cannot run, which is fair
+# when a board is one of hundreds being swept; it is exactly wrong when the
+# board is the one this module targets and the overflow is the finding. With
+# the flag the same case becomes an `error (Build failure - ld.bfd: region
+# overflowed)` and a non-zero exit. See issue #48.
 set -x
 exec west twister \
 	-T "${test_path}" \
@@ -86,5 +100,6 @@ exec west twister \
 	--outdir "${outdir}" \
 	--inline-logs \
 	--verbose \
+	--overflow-as-errors \
 	${extra_args[@]+"${extra_args[@]}"} \
 	"$@"

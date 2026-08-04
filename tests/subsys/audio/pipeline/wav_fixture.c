@@ -6,8 +6,11 @@
  */
 
 #include <errno.h>
+/* zephyr/fs/ext2.h declares a bool field without pulling this in itself. */
+#include <stdbool.h>
 #include <string.h>
 
+#include <zephyr/fs/ext2.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
@@ -19,14 +22,50 @@
 /* Disk name of the ramdisk0 node in app.overlay. */
 #define AUDIO_TEST_DISK_NAME "RAM"
 
+/*
+ * ext2 derives its inode count from the size of the storage rather than from
+ * the number of files anyone intends to put on it: the format reserves one
+ * inode per `bytes_per_inode` bytes of disk. The built-in default is 4096,
+ * which on the 64 KiB RAM disk app.overlay declares works out to sixteen
+ * inodes, eleven of which the format claims for itself - leaving five files
+ * for a fixture whose suites together write nearly forty.
+ *
+ * Buying those inodes at the default density would mean a disk of roughly
+ * 200 KiB, which is precisely the cost issue #48 exists to remove; the disk
+ * would be back to eating most of the target's RAM, and it would be buying
+ * space the files never use. So the fixture formats the disk itself rather
+ * than letting the mount do it. That is the only way to choose: ext2_mount()
+ * formats with ext2_default_cfg and offers no hook to override it, while
+ * fs_mkfs() takes a config.
+ *
+ * 512 bytes per inode is picked against what these files actually are. Every
+ * one of them is a small WAV - the largest, the round-trip golden in
+ * test_roundtrip.c, is 224 bytes - so each occupies exactly one 1024-byte
+ * block. At this density the 64 KiB disk formats to 96 inodes against 45 free
+ * blocks, so blocks, not inodes, are what the fixture can run out of, which is
+ * the right way round: it now fails when the files genuinely get big rather
+ * than when they merely get numerous.
+ */
+static struct ext2_cfg audio_test_fs_cfg = {
+	.block_size = 1024,
+	/* 0 means "use the whole disk", which is what the overlay sizes. */
+	.fs_size = 0,
+	.bytes_per_inode = 512,
+	.set_uuid = false,
+};
+
 static struct fs_mount_t audio_test_mnt = {
 	.type = FS_EXT2,
 	.mnt_point = AUDIO_TEST_MOUNT_POINT,
 	.storage_dev = (void *)AUDIO_TEST_DISK_NAME,
-	/* No FS_MOUNT_FLAG_NO_FORMAT: the RAM disk comes up zeroed, so the
-	 * first mount formats it (CONFIG_FILE_SYSTEM_MKFS).
+	/*
+	 * FS_MOUNT_FLAG_NO_FORMAT: audio_test_fs_mount() has already run
+	 * fs_mkfs() with the config above, so a mount that still wants to
+	 * format is a mount that did not find that filesystem - an error worth
+	 * seeing, not something to paper over by silently reformatting at the
+	 * defaults this fixture deliberately does not use.
 	 */
-	.flags = 0,
+	.flags = FS_MOUNT_FLAG_NO_FORMAT,
 };
 
 int audio_test_fs_mount(void)
@@ -36,6 +75,16 @@ int audio_test_fs_mount(void)
 
 	if (mounted) {
 		return 0;
+	}
+
+	/*
+	 * The RAM disk comes up zeroed on every boot, so there is never an
+	 * existing filesystem to preserve and formatting unconditionally here
+	 * costs nothing. Note this runs once per image, guarded by `mounted`.
+	 */
+	ret = fs_mkfs(FS_EXT2, (uintptr_t)AUDIO_TEST_DISK_NAME, &audio_test_fs_cfg, 0);
+	if (ret < 0) {
+		return ret;
 	}
 
 	ret = fs_mount(&audio_test_mnt);
