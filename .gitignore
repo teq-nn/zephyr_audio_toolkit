@@ -1,8 +1,12 @@
 # Zephyr / west build output
 build/
 build-*/
+# Twister's own rotation suffixes its outdir with .1, .2, ...; CI_TEST_OUTDIR
+# names one per job (twister-out-samples, twister-out-tests), so match both
+# separator styles rather than listing each job's directory here.
 twister-out/
 twister-out.*/
+twister-out-*/
 
 # west workspace metadata (only present when this repo is the manifest repo)
 .west/

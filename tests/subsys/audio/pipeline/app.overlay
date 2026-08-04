@@ -1,7 +1,23 @@
 /*
  * RAM disk backing the ext2 fixture filesystem the file node suites need
- * (see wav_fixture.h). 512 sectors of 512 bytes = 256 KiB, which is well
- * above the ext2 minimum and leaves room for the fixture files.
+ * (see wav_fixture.h). 128 sectors of 512 bytes = 64 KiB.
+ *
+ * That figure is a budget, not a convenience. The suites run on native_sim,
+ * where the disk is just host memory and any size at all would work, which is
+ * exactly how the previous 256 KiB came about: it was picked to sit well above
+ * the ext2 minimum with room to spare, against a host that has no ceiling to
+ * bump into. CI now also cross-compiles this suite for nucleo_h723zg
+ * (.github/workflows/ci.yml), so the fixture is sized against a real part
+ * instead - the STM32H723ZG has 320 KiB of AXI SRAM, and a 256 KiB disk claimed
+ * 80% of it before a single node or thread stack was accounted for. The link
+ * overflowed by roughly 87 KiB; see issue #48.
+ *
+ * 64 KiB is 64 ext2 blocks of 1024 bytes, comfortably clear of the 24 blocks
+ * ext2_format() refuses to go below (subsys/fs/ext2/ext2_format.c) and far more
+ * than the fixture files ask for - every file these suites write is a WAV of a
+ * few hundred bytes, the largest of them the round-trip golden in
+ * test_roundtrip.c. The fixture may still grow, but on a target-sized budget
+ * the growth now costs something a build can see.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -11,6 +27,6 @@
 		compatible = "zephyr,ram-disk";
 		disk-name = "RAM";
 		sector-size = <512>;
-		sector-count = <512>;
+		sector-count = <128>;
 	};
 };
