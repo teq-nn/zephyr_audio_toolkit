@@ -5,7 +5,14 @@ pull-based audio pipeline subsystem: sources, filters, and sinks chained behind 
 thread, with static memory only. Architectural intent lives alongside the code so the module can
 evolve without drifting from the authored contract.
 
-New here? Read `audio_pipeline_spec_short.md` first — it is the one-page digest of the contract.
+New here? Two entry points, depending on what you want:
+
+- **To use the module**, start at the wiki: [`docs/wiki/Home.md`](docs/wiki/Home.md). It has
+  two quick starts (run the sample, then write your own pipeline), the core concepts, the
+  architectural decisions behind them, a reference for every shipped node, and a
+  troubleshooting article. It is derived from the code and links back into it.
+- **To change the module**, read `audio_pipeline_spec_short.md` — the one-page digest of the
+  contract — and then the manifest and spec it digests.
 
 ## Layout
 
@@ -17,6 +24,9 @@ The tree follows the layout prescribed by manifest §12 and spec §14.
 - `audio_pipeline_spec_short.md` – the onboarding digest of the two documents above; refresh it
   whenever the manifest or spec changes materially.
 - `AGENTS.md` – contributor and agent guidelines (structure, style, testing, review).
+- `docs/wiki/` – the task-oriented user wiki (quick starts, concepts, architecture, node
+  reference, troubleshooting). It never overrides the manifest or the spec; on conflict,
+  those win, and the wiki is what gets corrected.
 - `zephyr/module.yml` – Zephyr module metadata; points the build at the root `CMakeLists.txt` and `Kconfig`. Zephyr only discovers modules via `zephyr/module.{yml,yaml}`, so this path is not optional.
 - `CMakeLists.txt` – module root; adds `subsys/audio/pipeline`.
 - `Kconfig` – module root menu; `rsource`s the subsystem Kconfig.

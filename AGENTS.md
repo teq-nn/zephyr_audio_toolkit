@@ -5,6 +5,7 @@
 - `audio_pipeline_spec_v2.md` is the implementation blueprint; keep it authoritative and mirror any API edits (e.g., `audio_node_ops` signatures) here first.
 - `audio_pipeline_spec_short.md` is the onboarding digest; refresh it after major manifest/spec edits so new agents grasp deltas quickly. It never overrides the manifest or the spec — on conflict, those win.
 - `README.md` describes the tree and the build/test entry points; keep its layout section in step with the actual directories.
+- `docs/wiki/` is the user-facing wiki (quick starts, concepts, architecture rationale, node reference, troubleshooting). It is derived from the code and sits below the manifest and the spec: on conflict those win. Refresh it when a public API, a Kconfig symbol, a node's accepted formats or an error code changes — those are exactly what it documents.
 
 ## Project Structure & Module Organization
 This repository is an out-of-tree Zephyr module. The tree follows manifest §12 / spec §14 — keep it that way and document any new file tree in the manifest to preserve the systems view.
